@@ -147,22 +147,24 @@ pub fn classify(report: &AdvReport) -> VendorMatch {
     }
 
     if let Some(uuid) = report.service_data_uuid() {
+        // Match on the raw UUID value: associated-constant field access is not a
+        // valid pattern, and duplicating the numbers in `match` keeps this readable.
         match uuid {
-            ServiceUuid::FAST_PAIR.0 => {
+            0xFE2C => {
                 return VendorMatch {
                     kind: TrackerKind::FastPair,
                     vendor: "Google",
                     detail: String::from("Fast Pair service data"),
                 };
             }
-            ServiceUuid::REMOTE_ID.0 => {
+            0xFFFA => {
                 return VendorMatch {
                     kind: TrackerKind::RemoteIdBroadcast,
                     vendor: "ASTM",
                     detail: String::from("Remote ID service data"),
                 };
             }
-            ServiceUuid::EDDYSTONE.0 => {
+            0xFEAA => {
                 return VendorMatch {
                     kind: TrackerKind::Other,
                     vendor: "Google",
@@ -276,8 +278,9 @@ pub fn parse_remote_id(service_data: &[u8]) -> Option<RemoteId> {
         // but not interpreted, never filled with invented values.
         return None;
     }
-    let ua_type = message[1] >> 4;
-    let id_type = message[1] & 0x0F;
+    // Byte 1 packs ID type in the high nibble and UA type in the low nibble.
+    let id_type = message[1] >> 4;
+    let ua_type = message[1] & 0x0F;
     let id_bytes: Vec<u8> = message[2..22]
         .iter()
         .copied()
@@ -392,7 +395,7 @@ mod tests {
         let mut service = alloc::vec![0xFA, 0xFF, 0x0D, 0x01];
         let mut message = alloc::vec![0x02, 0x12]; // Basic ID, proto 2, id type 1, UA type 2
         message.extend_from_slice(b"1596F3A2C4D5E6F7");
-        message.resize(21, 0);
+        message.resize(25, 0);
         service.extend_from_slice(&message);
         let parsed = parse_remote_id(&service).expect("basic id parses");
         assert_eq!(parsed.protocol_version, 2);
@@ -417,15 +420,24 @@ mod tests {
 
     #[test]
     fn remote_id_is_classified_from_advertisement() {
+        // Remote ID needs 29 bytes of service data, so it is advertised without a
+        // Flags element (as real transmitters do in the 31-byte legacy payload).
         let mut service = alloc::vec![0xFA, 0xFF, 0x0D, 0x00];
         service.extend_from_slice(&[0x02, 0x12]);
         service.resize(4 + 25, 0);
-        let report = report_from(|b| {
-            b.service_data16(ServiceUuid::REMOTE_ID.0, &service[2..]);
-        });
+        let mut builder = AdvBuilder::new();
+        assert!(builder.service_data16(ServiceUuid::REMOTE_ID.0, &service[2..]));
+        let report = AdvReport::parse(
+            BleAddress::new([0x33; 6]),
+            -50,
+            builder.as_slice(),
+            false,
+            0,
+        );
         let matched = classify(&report);
         assert_eq!(matched.kind, TrackerKind::RemoteIdBroadcast);
         let parsed = parse_remote_id(&service).expect("basic id");
         assert_eq!(parsed.ua_type, "Helicopter/multirotor");
+        assert_eq!(remote_id_message_type(&service), Some(0));
     }
 }

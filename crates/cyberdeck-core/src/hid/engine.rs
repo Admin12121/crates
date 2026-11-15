@@ -230,18 +230,32 @@ impl HidEngine {
                     if self.text_index < text.len() {
                         let ch = text[self.text_index] as char;
                         self.text_index += 1;
+                        // Advance past the command as soon as its last character is
+                        // emitted, so a following DELAY is folded exactly once.
+                        let exhausted = self.text_index >= text.len() && !enter;
                         if let Some((keycode, shift)) = self.layout.map_char(ch) {
                             let modifiers = if shift { modifier::LEFT_SHIFT } else { 0 };
                             self.typed_chars = self.typed_chars.saturating_add(1);
                             self.keystrokes = self.keystrokes.saturating_add(1);
                             self.release_pending = true;
                             self.release_modifiers = modifiers;
+                            if exhausted {
+                                self.pc += 1;
+                                self.text_index = 0;
+                            }
                             return Some(Output::Keyboard(KeyboardReport::new(
                                 modifiers | self.held_modifiers,
                                 keycode,
                             )));
                         }
                         self.unsupported_chars = self.unsupported_chars.saturating_add(1);
+                        // Skip the remainder of a multi-byte UTF-8 sequence so one
+                        // character is reported once, not once per byte.
+                        while self.text_index < text.len()
+                            && (text[self.text_index] & 0xC0) == 0x80
+                        {
+                            self.text_index += 1;
+                        }
                         continue;
                     }
                     if enter {
@@ -517,10 +531,10 @@ mod tests {
         assert!(matches!(engine.next_report(0), Some(Output::Keyboard(_))));
         // Release after the key delay; the following DELAY is folded in immediately.
         assert!(matches!(engine.next_report(12), Some(Output::Keyboard(_))));
-        // Second character is held back until release + 100 ms.
+        // Second character is held back until release + key delay + 100 ms.
         assert!(engine.next_report(50).is_none());
-        assert!(engine.next_report(111).is_none());
-        assert!(engine.next_report(112).is_some());
+        assert!(engine.next_report(123).is_none());
+        assert!(engine.next_report(124).is_some());
     }
 
     #[test]

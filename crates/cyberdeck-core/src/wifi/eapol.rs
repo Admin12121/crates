@@ -15,7 +15,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::error::DeckError;
 use crate::net::MacAddr;
 use crate::util::{hex_encode, read_u16_be};
 
@@ -601,9 +600,19 @@ mod tests {
         // Pad to the minimum EAPOL-Key length with zeroed MIC area.
         let mut frame = raw.clone();
         frame.resize(MIN_EAPOL_KEY_LEN, 0);
+        // Replay counter sits right after key length and is big-endian.
+        frame[9..17].copy_from_slice(&0x10u64.to_be_bytes());
+        // A message 2 always carries the supplicant nonce (M4 is recognised by a
+        // zero nonce, so the fixture must be a real M2).
+        for (i, byte) in frame[17..49].iter_mut().enumerate() {
+            *byte = 0xA0 + i as u8;
+        }
         frame[KEY_DATA_LEN_OFFSET..KEY_DATA_LEN_OFFSET + 2].copy_from_slice(&20u16.to_be_bytes());
         frame.resize(MIN_EAPOL_KEY_LEN + 20, 0);
         frame[MIN_EAPOL_KEY_LEN..MIN_EAPOL_KEY_LEN + 6].copy_from_slice(&PMKID_KDE_PREFIX);
+        // Keep the EAPOL length field consistent with the padded frame.
+        let eapol_len = (frame.len() - 4) as u16;
+        frame[2..4].copy_from_slice(&eapol_len.to_be_bytes());
         let parsed = EapolKey::parse(&frame).expect("parses");
         assert_eq!(parsed.descriptor, DESCRIPTOR_RSN);
         assert!(parsed.key_info & KEY_INFO_MIC != 0);

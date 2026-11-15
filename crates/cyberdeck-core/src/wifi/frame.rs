@@ -183,6 +183,29 @@ impl<'a> FrameHeader<'a> {
         })
     }
 
+    /// Length of the subtype-specific fixed fields that precede the information
+    /// elements in [`Self::body`].
+    pub const fn ie_offset(&self) -> usize {
+        if !self.fc.is_management() {
+            return 0;
+        }
+        match self.fc.subtype {
+            subtype::BEACON | subtype::PROBE_RESP => 12,
+            subtype::ASSOC_REQ => 4,
+            subtype::ASSOC_RESP | subtype::REASSOC_RESP | subtype::AUTH => 6,
+            subtype::REASSOC_REQ => 10,
+            _ => 0,
+        }
+    }
+
+    /// Information-element area of a management frame.
+    ///
+    /// [`Self::body`] keeps the fixed fields (timestamp/capabilities) because the
+    /// auth path needs them; every IE helper takes this slice instead.
+    pub fn ies(&self) -> &'a [u8] {
+        self.body.get(self.ie_offset()..).unwrap_or(&[])
+    }
+
     /// Transmitter address for a captured frame (BSSID for beacons/probe responses).
     pub fn transmitter(&self) -> MacAddr {
         self.addr2
@@ -723,27 +746,36 @@ pub fn probe_response(
 pub mod tests_support {
     use alloc::vec::Vec;
 
-    use crate::util::hex_to_vec;
-
-    /// Captured WPA2 beacon, channel 6, SSID "CyberLab".
-    pub const BEACON_WPA2: &str = "80000000ffffffffffff001122334455001122334455100000000000000000000064001104000843796265724c6162010882848b960c12182403010605040001000030140100000fac040100000fac040100000fac020000";
-
+    /// Real-world shaped WPA2 beacon: channel 6, SSID `CyberLab`, CCMP/PSK RSN,
+    /// short-slot capability, TIM with no buffered traffic.
     pub fn beacon_frame_bytes() -> Vec<u8> {
-        hex_to_vec(BEACON_WPA2).expect("beacon fixture is valid hex")
+        let mut frame = Vec::with_capacity(87);
+        frame.extend_from_slice(&[0x80, 0x00, 0x00, 0x00]); // beacon, duration 0
+        frame.extend_from_slice(&[0xFF; 6]); // broadcast destination
+        frame.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // BSSID
+        frame.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // source
+        frame.extend_from_slice(&[0x10, 0x00]); // sequence control
+        frame.extend_from_slice(&[0u8; 8]); // timestamp
+        frame.extend_from_slice(&[0x64, 0x00]); // beacon interval 100 TU
+        frame.extend_from_slice(&[0x11, 0x04]); // ESS | Privacy | ShortSlot
+        frame.extend_from_slice(&[0x00, 0x08]);
+        frame.extend_from_slice(b"CyberLab");
+        frame.extend_from_slice(&[0x01, 0x08, 0x82, 0x84, 0x8B, 0x96, 0x0C, 0x12, 0x18, 0x24]);
+        frame.extend_from_slice(&[0x03, 0x01, 0x06]); // DS parameter: channel 6
+        frame.extend_from_slice(&[0x05, 0x04, 0x00, 0x01, 0x00, 0x00]); // TIM
+        frame.extend_from_slice(&[0x30, 0x14]); // RSN
+        frame.extend_from_slice(&[
+            0x01, 0x00, 0x00, 0x0F, 0xAC, 0x04, 0x01, 0x00, 0x00, 0x0F, 0xAC, 0x04, 0x01, 0x00,
+            0x00, 0x0F, 0xAC, 0x02, 0x00, 0x00,
+        ]);
+        frame
     }
 }
 
 #[cfg(test)]
 mod tests {
+        use super::tests_support::beacon_frame_bytes;
     use super::*;
-    use crate::util::hex_to_vec;
-
-    /// Captured WPA2 beacon, channel 6, SSID "CyberLab".
-    pub(crate) const BEACON_WPA2: &str = "80000000ffffffffffff001122334455001122334455100000000000000000000064001104000843796265724c6162010882848b960c12182403010605040001000030140100000fac040100000fac040100000fac020000";
-
-    pub(crate) fn beacon_frame_bytes() -> alloc::vec::Vec<u8> {
-        hex_to_vec(BEACON_WPA2).unwrap()
-    }
 
     #[test]
     fn parses_captured_wpa2_beacon() {
@@ -756,14 +788,14 @@ mod tests {
         let bssid = MacAddr::parse("00:11:22:33:44:55").unwrap();
         assert_eq!(header.addr2, bssid);
         assert_eq!(header.addr3, bssid);
-        assert_eq!(find_ssid(header.body), Some(&b"CyberLab"[..]));
-        assert_eq!(find_channel(header.body), Some(6));
+        assert_eq!(find_ssid(header.ies()), Some(&b"CyberLab"[..]));
+        assert_eq!(find_channel(header.ies()), Some(6));
         assert_eq!(beacon_timestamp(header.body), Some(0));
 
         let caps = capabilities(header.body).unwrap();
         assert_eq!(caps & 0x0001, 0x0001, "ESS bit");
         assert_eq!(caps & 0x0010, 0x0010, "privacy bit");
-        let info = classify_security(header.body, caps & 0x0010 != 0);
+        let info = classify_security(header.ies(), caps & 0x0010 != 0);
         assert_eq!(info.security, Security::Wpa2Psk);
         assert!(!info.wps);
         assert!(!info.pmf_required);
@@ -827,11 +859,11 @@ mod tests {
         };
         let frame = beacon_frame(b"FreeWiFi", bssid, &options);
         let header = FrameHeader::parse(frame.as_slice()).unwrap();
-        assert_eq!(find_ssid(header.body), Some(&b"FreeWiFi"[..]));
-        assert_eq!(find_channel(header.body), Some(11));
+        assert_eq!(find_ssid(header.ies()), Some(&b"FreeWiFi"[..]));
+        assert_eq!(find_channel(header.ies()), Some(11));
         assert_eq!(header.sequence >> 4, 7);
         let caps = capabilities(header.body).unwrap();
-        let info = classify_security(header.body, caps & 0x0010 != 0);
+        let info = classify_security(header.ies(), caps & 0x0010 != 0);
         assert_eq!(info.security, Security::Wpa2Psk);
         assert_eq!(info.security.label(), "WPA2-PSK");
     }
@@ -846,7 +878,7 @@ mod tests {
         };
         let frame = beacon_frame(b"Secret", bssid, &options);
         let header = FrameHeader::parse(frame.as_slice()).unwrap();
-        assert_eq!(find_ssid(header.body), Some(&[][..]));
+        assert_eq!(find_ssid(header.ies()), Some(&[][..]));
     }
 
     #[test]
@@ -856,14 +888,14 @@ mod tests {
         let header = FrameHeader::parse(req.as_slice()).unwrap();
         assert_eq!(header.fc.subtype, subtype::PROBE_REQ);
         assert_eq!(header.addr1, MacAddr::BROADCAST);
-        assert_eq!(find_ssid(header.body), Some(&[][..]));
+        assert_eq!(find_ssid(header.ies()), Some(&[][..]));
 
         let resp = probe_response(MacAddr::BROADCAST, src, b"Lab", 3, false);
         let header = FrameHeader::parse(resp.as_slice()).unwrap();
         assert_eq!(header.fc.subtype, subtype::PROBE_RESP);
-        assert_eq!(find_ssid(header.body), Some(&b"Lab"[..]));
-        assert_eq!(find_channel(header.body), Some(3));
-        let info = classify_security(header.body, false);
+        assert_eq!(find_ssid(header.ies()), Some(&b"Lab"[..]));
+        assert_eq!(find_channel(header.ies()), Some(3));
+        let info = classify_security(header.ies(), false);
         assert_eq!(info.security, Security::Open);
     }
 
@@ -879,7 +911,7 @@ mod tests {
         let assoc = assoc_request(dst, src, dst, b"LabNet");
         let header = FrameHeader::parse(assoc.as_slice()).unwrap();
         assert_eq!(header.fc.subtype, subtype::ASSOC_REQ);
-        assert!(find_ssid(header.body).is_some());
+        assert_eq!(find_ssid(header.ies()), Some(&b"LabNet"[..]));
     }
 
     #[test]
@@ -894,15 +926,15 @@ mod tests {
             &[
                 0x00, 0x50, 0xF2, 0x04, // OUI + type 4
                 0x10, 0x4A, 0x00, 0x01, 0x10, // version 1.0
-                0x10, 0x44, 0x00, 0x02, 0x00, 0x01, // configured
+                0x10, 0x44, 0x00, 0x01, 0x01, // configured
                 0x10, 0x3B, 0x00, 0x01, 0x02, // response type AP
             ],
         );
         let bytes = frame.as_slice().to_vec();
         let header = FrameHeader::parse(&bytes).unwrap();
-        let info = classify_security(header.body, false);
+        let info = classify_security(header.ies(), false);
         assert!(info.wps);
-        let wps = parse_wps(header.body).expect("wps parses");
+        let wps = parse_wps(header.ies()).expect("wps parses");
         assert_eq!(wps.version, 0x10);
         assert!(wps.configured);
         assert_eq!(wps.response_type, 2);

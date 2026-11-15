@@ -77,14 +77,17 @@ pub enum DataRate {
 
 impl DataRate {
     /// RF_SETUP bits for this rate (0 dBm output power).
+    ///
+    /// RF_SETUP layout: bit5 `RF_DR_LOW` (250 kbps), bit3 `RF_DR_HIGH` (2 Mbps),
+    /// bits2:1 `RF_PWR` (0b11 = 0 dBm).
     pub const fn rf_setup_bits(self) -> u8 {
-        // Bit 3 = RF_DR_LOW (250 kbps), bit 2 = RF_DR_HIGH (2 Mbps).
-        // RF_PWR = 11 => 0 dBm.
         const PWR_0DBM: u8 = 0x06;
+        const RF_DR_LOW: u8 = 0x20;
+        const RF_DR_HIGH: u8 = 0x08;
         match self {
-            Self::Kbps250 => PWR_0DBM | 0x08,
+            Self::Kbps250 => PWR_0DBM | RF_DR_LOW,
             Self::Mbps1 => PWR_0DBM,
-            Self::Mbps2 => PWR_0DBM | 0x04,
+            Self::Mbps2 => PWR_0DBM | RF_DR_HIGH,
         }
     }
 
@@ -409,8 +412,10 @@ mod tests {
 
     #[test]
     fn data_rate_bits_match_datasheet() {
-        assert_eq!(DataRate::Mbps1.rf_setup_bits() & 0x0C, 0x00);
-        assert_eq!(DataRate::Mbps2.rf_setup_bits() & 0x0C, 0x04);
-        assert_eq!(DataRate::Kbps250.rf_setup_bits() & 0x0C, 0x08);
+        assert_eq!(DataRate::Mbps1.rf_setup_bits(), 0x06);
+        assert_eq!(DataRate::Mbps2.rf_setup_bits(), 0x0E);
+        assert_eq!(DataRate::Kbps250.rf_setup_bits(), 0x26);
+        assert_eq!(DataRate::Mbps2.rf_setup_bits() & 0x08, 0x08, "RF_DR_HIGH");
+        assert_eq!(DataRate::Kbps250.rf_setup_bits() & 0x20, 0x20, "RF_DR_LOW");
     }
 }

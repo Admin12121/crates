@@ -82,6 +82,7 @@ impl MenuItem {
         let badge = self.status.short_label();
         let detail = self.detail.as_deref().unwrap_or("");
         let mut right = String::new();
+        let _ = &right;
         if !badge.is_empty() {
             right.push_str(badge);
         }
@@ -91,11 +92,11 @@ impl MenuItem {
             }
             right.push_str(detail);
         }
+        if right.is_empty() {
+            return super::ellipsize(&self.label, width);
+        }
         let left_width = width.saturating_sub(right.chars().count() + 1).max(1);
         let left = super::ellipsize(&self.label, left_width);
-        if right.is_empty() {
-            return left;
-        }
         let pad = width
             .saturating_sub(left.chars().count() + right.chars().count())
             .max(1);

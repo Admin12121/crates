@@ -457,11 +457,12 @@ impl<const A: usize, const S: usize> ScanEngine<A, S> {
             (frame::FRAME_TYPE_MGMT, subtype::BEACON)
             | (frame::FRAME_TYPE_MGMT, subtype::PROBE_RESP) => {
                 let is_beacon = header.fc.subtype == subtype::BEACON;
-                let ssid = frame::find_ssid(header.body).unwrap_or(&[]);
+                let ies = header.ies();
+                let ssid = frame::find_ssid(ies).unwrap_or(&[]);
                 let caps = frame::capabilities(header.body).unwrap_or(0);
-                let security = frame::classify_security(header.body, caps & 0x0010 != 0);
+                let security = frame::classify_security(ies, caps & 0x0010 != 0);
                 let bssid = header.addr3;
-                let chan = frame::find_channel(header.body).unwrap_or(channel);
+                let chan = frame::find_channel(ies).unwrap_or(channel);
                 self.aps.observe(
                     bssid,
                     Ssid::new(ssid),

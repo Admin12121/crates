@@ -26,8 +26,8 @@ impl PortalTemplate {
     pub const fn label(self) -> &'static str {
         match self {
             Self::NetworkSignIn => "Network Sign-In",
-            Self::RouterUpdate => "Router Update",
-            Self::WifiUpdate => "Wi-Fi Update",
+            Self::RouterUpdate => "Router Firmware Update",
+            Self::WifiUpdate => "Wi-Fi Password Update",
         }
     }
 
@@ -101,7 +101,10 @@ pub fn parse_request(data: &[u8]) -> Option<HttpRequest> {
     let mut parts = request_line.split(' ');
     let method = parts.next()?.trim();
     let path = parts.next()?.trim();
-    if method.is_empty() || path.is_empty() {
+    // RFC 7230 requires the HTTP version on the request line; captive-portal
+    // clients always send it, so its absence means this is not an HTTP request.
+    let version = parts.next()?.trim();
+    if method.is_empty() || path.is_empty() || !version.starts_with("HTTP/") {
         return None;
     }
     let mut host = None;

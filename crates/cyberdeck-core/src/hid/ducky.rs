@@ -270,10 +270,14 @@ pub fn parse(name: &str, source: &str) -> Result<Script, ParseError> {
     })
 }
 
-/// Split `COMMAND rest` respecting that `STRING` keeps its tail verbatim.
+/// Split `COMMAND rest`. Exactly one separating space is removed so that
+/// `STRING   x` types the two leading spaces, as DuckyScript specifies.
 fn split_command(line: &str) -> (&str, &str) {
     match line.find(char::is_whitespace) {
-        Some(idx) => (&line[..idx], line[idx + 1..].trim_start()),
+        Some(idx) => {
+            let rest = &line[idx..];
+            (&line[..idx], rest.strip_prefix(' ').unwrap_or(rest))
+        }
         None => (line, ""),
     }
 }
@@ -371,9 +375,12 @@ fn parse_chord_opt(
                         return Err(ParseError::new(line_no, "unknown key name"));
                     }
                 } else if token.chars().count() == 1 {
-                    // Single printable character: use the US layout.
+                    // Chords name a key, not a character: `CTRL A` presses the A key
+                    // without Shift, so letters are mapped lower-case.
+                    let ch = token.chars().next().unwrap_or(' ');
+                    let ch = ch.to_ascii_lowercase();
                     let (code, shift) = super::Layout::Us
-                        .map_char(token.chars().next().unwrap_or(' '))
+                        .map_char(ch)
                         .ok_or(ParseError::new(line_no, "key is not representable on a US layout"))?;
                     if shift {
                         modifiers |= modifier::LEFT_SHIFT;
@@ -425,10 +432,17 @@ CTRL-SHIFT ESC
             }
         );
         assert_eq!(
-            script.commands[5],
+            script.commands[4],
             Command::Text {
                 text: b"notepad".to_vec(),
                 enter: false
+            }
+        );
+        assert_eq!(
+            script.commands[5],
+            Command::Key {
+                modifiers: 0,
+                keycode: key::ENTER
             }
         );
         assert_eq!(
@@ -475,10 +489,17 @@ CTRL-SHIFT ESC
         let err = parse("bad", "bogus_key_name\n").unwrap_err();
         assert!(err.message.contains("unknown key"));
 
-        let err = parse("bad", "CTRL CTRL A\n").unwrap_err();
-        assert_eq!(err.line, 1);
-        let err = parse("bad", "A B\n").unwrap_err();
+        let err = parse("bad", "CTRL A B\n").unwrap_err();
         assert!(err.message.contains("only one key"));
+        // Repeated modifiers collapse into one bitmask (CTRL CTRL A == CTRL A).
+        let script = parse("ok", "CTRL CTRL A").unwrap();
+        assert_eq!(
+            script.commands[0],
+            Command::Key {
+                modifiers: modifier::LEFT_CTRL,
+                keycode: key::A
+            }
+        );
     }
 
     #[test]

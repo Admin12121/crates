@@ -317,7 +317,10 @@ mod tests {
         assert_eq!(record[16 + 16], RADIOTAP_FLAG_FCS);
         // Frame follows the 23-byte radiotap header verbatim.
         assert_eq!(&record[16 + Radiotap::LEN..16 + incl], &frame[..]);
-        assert_eq!(u32::from_le_bytes(record[16 + 2..16 + 4].try_into().unwrap()), 23);
+        assert_eq!(
+            u16::from_le_bytes(record[16 + 2..16 + 4].try_into().unwrap()),
+            Radiotap::LEN as u16
+        );
     }
 
     #[test]

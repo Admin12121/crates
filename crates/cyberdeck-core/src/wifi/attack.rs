@@ -212,7 +212,8 @@ impl AttackRunner {
             pause_until_us: 0,
             started_ms,
             frames: 0,
-            bursts: 0,
+            // The runner starts inside its first burst.
+            bursts: 1,
             target_cursor: 0,
             ssid_cursor: 0,
         }
@@ -251,15 +252,17 @@ impl AttackRunner {
 
     /// Produce the next frame if the cadence allows it.
     pub fn next_frame(&mut self, now_us: u64, out: &mut FrameBuffer) -> Option<TxKind> {
-        if now_us < self.pause_until_us || now_us < self.next_tx_us {
+        if now_us < self.next_tx_us {
             return None;
         }
         if self.burst_left == 0 {
+            // Inter-burst pause is measured from the last frame of the previous
+            // burst; the poll that lands on its end transmits immediately.
+            if now_us < self.pause_until_us {
+                return None;
+            }
             self.burst_left = self.plan.burst.max(1);
             self.bursts = self.bursts.saturating_add(1);
-            self.pause_until_us = now_us + u64::from(self.plan.burst_pause_us);
-            self.next_tx_us = self.pause_until_us;
-            return None;
         }
 
         let kind = match self.plan.mode {
@@ -308,6 +311,9 @@ impl AttackRunner {
         self.frames = self.frames.saturating_add(1);
         self.burst_left = self.burst_left.saturating_sub(1);
         self.next_tx_us = now_us + u64::from(self.plan.interval_us);
+        if self.burst_left == 0 {
+            self.pause_until_us = now_us + u64::from(self.plan.burst_pause_us);
+        }
         Some(kind)
     }
 
@@ -400,12 +406,14 @@ mod tests {
         let mut frame = FrameBuffer::new();
         assert!(runner.next_frame(0, &mut frame).is_some());
         assert!(runner.next_frame(10_000, &mut frame).is_some());
-        // Third frame is held back by the burst pause.
+        // Third frame is held back by the burst pause (50 ms from the burst end).
         assert!(runner.next_frame(20_000, &mut frame).is_none());
         assert_eq!(runner.frames(), 2);
         assert_eq!(runner.bursts(), 1);
-        assert!(runner.next_frame(50_000, &mut frame).is_some());
+        assert!(runner.next_frame(59_999, &mut frame).is_none());
+        assert!(runner.next_frame(60_000, &mut frame).is_some());
         assert_eq!(runner.bursts(), 2);
+        assert_eq!(runner.frames(), 3);
     }
 
     #[test]
@@ -432,7 +440,7 @@ mod tests {
             if runner.next_frame(i * 10_000, &mut frame).is_some() {
                 let header = frame::FrameHeader::parse(frame.as_slice()).expect("valid beacon");
                 assert_eq!(header.fc.subtype, frame::subtype::BEACON);
-                assert_eq!(frame::find_channel(header.body), Some(6));
+                assert_eq!(frame::find_channel(header.ies()), Some(6));
                 seen.insert(frame.as_slice()[10..16].to_vec());
             }
         }

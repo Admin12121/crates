@@ -105,11 +105,12 @@ impl Spectrum {
             return;
         }
         let last = (CHANNEL_COUNT - 1) as i32;
+        let out_len = out.len() as i32;
         for (i, slot) in out.iter_mut().enumerate() {
-            let position = if out.len() == 1 {
+            let position = if out_len == 1 {
                 0
             } else {
-                (i as i32 * last * 256) / (out.len() as i32 - 1)
+                (i as i32 * last * 256) / (out_len - 1)
             };
             let mut carrier = (position >> 8).clamp(0, last - 1);
             let fraction = position & 0xFF;
@@ -129,11 +130,12 @@ impl Spectrum {
             return;
         }
         let last = (CHANNEL_COUNT - 1) as i32;
+        let out_len = out.len() as i32;
         for (i, slot) in out.iter_mut().enumerate() {
-            let position = if out.len() == 1 {
+            let position = if out_len == 1 {
                 0
             } else {
-                (i as i32 * last * 256) / (out.len() as i32 - 1)
+                (i as i32 * last * 256) / (out_len - 1)
             };
             let carrier = (position >> 8).clamp(0, last - 1);
             let a = i32::from(self.peak[carrier as usize]);

@@ -1,6 +1,6 @@
 //! BLE advertising-data parsing, advertisement reports and the bounded device table.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::net::MacAddr;
@@ -472,11 +472,14 @@ mod tests {
 
     #[test]
     fn parses_apple_continuity_advertisement() {
-        // Flags + Apple manufacturer data (company 0x004C) + name.
-        let payload = hex_to_vec("0201061AFF4C000215000102030405060708090A0B0C0D0E0F0100").unwrap();
+        // Flags + a complete 25-byte Apple iBeacon manufacturer body.
+        let payload = hex_to_vec(
+            "0201061AFF4C000215000102030405060708090A0B0C0D0E0F01000102C5",
+        )
+        .unwrap();
         let report = AdvReport::parse(BleAddress::new([1, 2, 3, 4, 5, 6]), -62, &payload, false, 10);
         assert_eq!(report.company_id(), Some(0x004C));
-        assert_eq!(report.company_payload().len(), 24);
+        assert_eq!(report.company_payload().len(), 23);
         assert_eq!(report.signal_dbm(), -62);
         assert_eq!(report.label(), "(no name)");
     }

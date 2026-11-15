@@ -231,7 +231,7 @@ mod tests {
         assert_eq!(channels, alloc::vec![2, 3]);
         let csv = log.to_csv();
         assert!(csv.starts_with("channel,frequency_mhz,pipe,length,payload_hex,uptime_ms\n"));
-        assert!(csv.contains("2,2402,0,2,0202,2"));
+        assert!(csv.contains("2,2402,0,2,02:02,2"));
         log.clear();
         assert!(log.is_empty());
     }

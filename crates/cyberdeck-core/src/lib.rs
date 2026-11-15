@@ -15,7 +15,13 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::mem_forget)]
 
+//! The firmware targets `no_std` + `alloc`; the host test build links `std` instead,
+//! which re-exports the same modules under the `alloc` name so module paths stay
+//! identical in both builds.
+#[cfg(not(test))]
 extern crate alloc;
+#[cfg(test)]
+extern crate std as alloc;
 
 pub mod ble;
 pub mod board;

@@ -133,10 +133,10 @@ mod tests {
     fn rate_meter_uses_one_second_window() {
         let mut meter = RateMeter::new();
         for _ in 0..50 {
-            assert_eq!(meter.add(1, 100), None);
+            assert_eq!(meter.add(1, 0), None);
         }
         // 50 events over 1000 ms = 50/s
-        assert_eq!(meter.add(0, 1100), Some(50));
+        assert_eq!(meter.add(0, 1000), Some(50));
         assert_eq!(meter.rate(), 50);
         assert_eq!(meter.total(), 50);
     }

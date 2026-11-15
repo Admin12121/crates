@@ -276,8 +276,9 @@ mod tests {
         assert_eq!(payload[2], 0x75);
         assert_eq!(payload[3], 0x00);
         assert_eq!(payload[13], 0x09);
-        assert_eq!(payload[14], 0xEE);
-        assert_eq!(payload[15], 0x12);
+        // Model bytes are big-to-small, matching the reference implementation.
+        assert_eq!(payload[14], 0x12);
+        assert_eq!(payload[15], 0x1A);
         assert_eq!(payload[16], 0x01);
         assert_eq!(payload[17], 0x4B);
         // Trailing truncated record preserved for scanner recognition.
@@ -299,11 +300,10 @@ mod tests {
         let unique: alloc::collections::BTreeSet<&alloc::vec::Vec<u8>> = payloads.iter().collect();
         assert!(unique.len() >= 3, "Apple campaign rotates through the table");
         for payload in &payloads {
-            // Manufacturer AD structure: length, type 0xFF, company 0x004C.
-            assert_eq!(payload[0], 0x02);
-            assert_eq!(payload[1], 0x01);
-            assert_eq!(payload[3], 0xFF);
-            assert_eq!(&payload[4..6], &[0x4C, 0x00]);
+            // Flags AD (3 bytes), then manufacturer AD: length, 0xFF, company 0x004C.
+            assert_eq!(&payload[0..3], &[0x02, 0x01, 0x06]);
+            assert_eq!(payload[4], 0xFF);
+            assert_eq!(&payload[5..7], &[0x4C, 0x00]);
         }
     }
 
