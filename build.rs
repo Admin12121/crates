@@ -1,4 +1,11 @@
 fn main() {
+    // Board profile selection is a build-time switch, not a source edit.
+    println!("cargo:rustc-check-cfg=cfg(cyberdeck_board_field)");
+    println!("cargo:rerun-if-env-changed=CYBERDECK_BOARD");
+    let board = std::env::var("CYBERDECK_BOARD").unwrap_or_default();
+    if board.eq_ignore_ascii_case("field") {
+        println!("cargo:rustc-cfg=cyberdeck_board_field");
+    }
     linker_be_nice();
     check_xtensa_linker_available();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)

@@ -201,14 +201,14 @@ pub const FIELD_PROFILE: BoardProfile = BoardProfile {
 /// All profiles known to this build.
 pub const PROFILES: &[BoardProfile] = &[CORE_PROFILE, FIELD_PROFILE];
 
-/// Profile compiled into this firmware. Board selection happens at build time via
-/// the `CYBERDECK_BOARD` environment variable (see `build.rs`); default is CORE.
+/// Look up a profile by id.
+pub fn profile(id: BoardId) -> &'static BoardProfile {
+    PROFILES.iter().find(|p| p.id == id).unwrap_or(&CORE_PROFILE)
+}
+
+/// Default profile for callers that have no build-time selection (host tests).
+/// The firmware picks FIELD/CORE from the `CYBERDECK_BOARD` build variable.
 pub fn active_profile() -> &'static BoardProfile {
-    #[cfg(cyberdeck_board_field)]
-    {
-        return &FIELD_PROFILE;
-    }
-    #[allow(unreachable_code)]
     &CORE_PROFILE
 }
 
