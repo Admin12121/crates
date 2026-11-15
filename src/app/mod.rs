@@ -12,6 +12,7 @@ use cyberdeck_core::ui::menu::{ItemStatus, MenuItem, MenuList};
 use cyberdeck_core::ui::{theme, Canvas, Rect};
 use cyberdeck_core::ui::font;
 
+use crate::platform::ble::BleDevice;
 use crate::platform::wifi::ApRow;
 
 /// Capability groups implemented by this build.
@@ -90,6 +91,8 @@ impl Tool {
                 | Self::WifiDeauth
                 | Self::PktCapture
                 | Self::PktAnalyse
+                | Self::BleScan
+                | Self::BleSpam
                 | Self::RfSpectrum
                 | Self::RfCapture
         )
@@ -116,6 +119,9 @@ pub struct Live {
     pub rf_peak: u8,
     pub rf_packets: u32,
     pub rf_dropped: u32,
+    pub ble_status: String,
+    pub ble_devices: Vec<BleDevice>,
+    pub ble_frames: u32,
     pub probe_lines: Vec<String>,
     pub message: Option<String>,
 }
@@ -422,8 +428,18 @@ impl App {
                 lines.push(format!("packets {}", self.live.rf_packets));
                 lines.push(format!("dropped {}", self.live.rf_dropped));
             }
-            Tool::BleScan | Tool::BleSpam | Tool::HidIntro | Tool::HidDucky => {
-                lines.push(String::from("transport not enabled in this build"));
+            Tool::BleScan | Tool::BleSpam => {
+                lines.push(self.live.ble_status.clone());
+                lines.push(format!("frames {}", self.live.ble_frames));
+                for device in self.live.ble_devices.iter().take(6) {
+                    lines.push(format!(
+                        "{:<16} {:>4}dB {}",
+                        device.name, device.rssi, device.kind
+                    ));
+                }
+            }
+            Tool::HidIntro | Tool::HidDucky => {
+                lines.push(String::from("USB HID transport not enabled"));
             }
         }
         let mut y = 26;

@@ -20,9 +20,11 @@ use cyberdeck_core::ui::Canvas;
 use cyberdeck_firmware::app::{Action, App, Live, Tool};
 use cyberdeck_firmware::platform::display::Display;
 use cyberdeck_firmware::platform::nrf24::Nrf24;
+use cyberdeck_firmware::platform::ble::{self, BleCommand};
 use cyberdeck_firmware::platform::probe::ProbeReport;
 use cyberdeck_firmware::platform::wifi::{self, WifiCommand};
 use cyberdeck_firmware::platform::Buttons;
+use bt_hci::controller::ExternalController;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
@@ -31,6 +33,7 @@ use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::spi::Mode;
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
+use esp_radio::ble::controller::BleConnector;
 use esp_radio::wifi::{ControllerConfig, WifiController};
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -43,6 +46,11 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 #[embassy_executor::task]
 async fn wifi_actor(controller: WifiController<'static>) {
     wifi::run(controller).await
+}
+
+#[embassy_executor::task]
+async fn ble_actor(controller: ExternalController<BleConnector<'static>, 1>) {
+    ble::run(controller).await
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -197,6 +205,27 @@ async fn main(spawner: Spawner) -> ! {
         Err(_) => probe.record(DeviceClass::WifiRadio, Err("Wi-Fi controller init failed")),
     }
 
+    // ---- BLE radio ----
+    let mut ble_started = false;
+    match BleConnector::new(peripherals.BT, Default::default()) {
+        Ok(connector) => {
+            let controller = ExternalController::<_, 1>::new(connector);
+            match ble_actor(controller) {
+                Ok(token) => {
+                    spawner.spawn(token);
+                    ble::online();
+                    ble_started = true;
+                    probe.record(
+                        DeviceClass::BleRadio,
+                        Ok(Some(alloc::string::String::from("BLE HCI"))),
+                    );
+                }
+                Err(_) => probe.record(DeviceClass::BleRadio, Err("BLE task could not start")),
+            }
+        }
+        Err(_) => probe.record(DeviceClass::BleRadio, Err("BLE controller init failed")),
+    }
+
     // ---- nRF24 (FIELD profile only; shares the SPI3 pins from the profile) ----
     let nrf = if profile.id == BoardId::FieldS3 && profile.nrf24.is_some() {
         let spi_config = SpiConfig::default()
@@ -285,6 +314,20 @@ async fn main(spawner: Spawner) -> ! {
                     Tool::PktAnalyse => {
                         app.set_message("live capture feeds the inspector");
                     }
+                    Tool::BleScan => {
+                        if !ble_started || !ble::submit(BleCommand::Scan) {
+                            app.set_message("Bluetooth radio busy");
+                        }
+                    }
+                    Tool::BleSpam => {
+                        if !ble_started
+                            || !ble::submit(BleCommand::Advertise(
+                                cyberdeck_core::ble::spam::SpamCampaign::Apple,
+                            ))
+                        {
+                            app.set_message("Bluetooth radio busy");
+                        }
+                    }
                     Tool::RfSpectrum => {
                         if rf.radio.is_some() {
                             rf_mode = RfMode::Spectrum;
@@ -308,6 +351,9 @@ async fn main(spawner: Spawner) -> ! {
                     if wifi_started {
                         wifi::submit(WifiCommand::Stop);
                     }
+                    if ble_started {
+                        ble::submit(BleCommand::Stop);
+                    }
                     rf_mode = RfMode::Off;
                     rf.mode = RfMode::Off;
                 }
@@ -318,6 +364,7 @@ async fn main(spawner: Spawner) -> ! {
         rf.step(now_ms);
 
         let (status, aps, frames, dropped, _channel, _frame) = wifi::snapshot();
+        let (ble_status, ble_devices, ble_frames, _ble_dropped) = ble::snapshot();
         let mut live = Live {
             wifi_status: status,
             wifi_busy: false,
@@ -328,6 +375,9 @@ async fn main(spawner: Spawner) -> ! {
             rf_peak: rf.spectrum.peak_channel().unwrap_or(0),
             rf_packets: rf.packets,
             rf_dropped: rf.log.dropped(),
+            ble_status,
+            ble_devices,
+            ble_frames,
             probe_lines: probe.lines.clone(),
             message: None,
         };

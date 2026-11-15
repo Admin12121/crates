@@ -5,6 +5,7 @@
 //! §3A.8), so constructors return `Result` and callers record the outcome in the
 //! peripheral registry instead of unwrapping.
 
+pub mod ble;
 pub mod display;
 pub mod input;
 pub mod nrf24;
