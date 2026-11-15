@@ -1,0 +1,13 @@
+[package]
+name         = "cyberdeck-core"
+description  = "CyberDeck hardware: hardware-independent protocol engines, models and UI projections"
+edition      = "2024"
+rust-version = "1.95"
+version      = "0.1.0"
+license      = "MIT OR Apache-2.0"
+
+# Deliberately dependency-free: the firmware and the host test suite share exactly
+# one implementation of every protocol/format engine.
+[dependencies]
+
+[dev-dependencies]

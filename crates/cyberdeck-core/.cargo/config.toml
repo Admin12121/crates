@@ -1,0 +1,11 @@
+# Host-side tests for the hardware-independent core crate.
+#
+# The repository root targets `xtensa-esp32s3-none-elf` and enables `build-std`,
+# which is correct for the firmware but cannot produce a hosted test harness.
+# Running `cargo test` from this directory therefore uses the host triple with
+# an empty `build-std` list.
+[unstable]
+build-std = []
+
+[build]
+rustflags = []
