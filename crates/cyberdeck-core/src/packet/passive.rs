@@ -41,7 +41,6 @@ impl<const A:usize,const S:usize,const H:usize,const R:usize> Default for Passiv
 impl<const A:usize,const S:usize,const H:usize,const R:usize> PassiveEngine<A,S,H,R> {
     pub const fn new()->Self {Self {scan:ScanEngine::new(),handshakes:HandshakeStore::new(),frames:Vec::new(),wps:Vec::new(),probes:Vec::new(),latest:LatestFrame::new(),histogram:ProtocolHistogram {beacons:0,probe_requests:0,probe_responses:0,authentication:0,association:0,deauthentication:0,disassociation:0,action:0,eapol:0,data:0,control:0,other:0,malformed:0}}}
     pub fn on_frame(&mut self,data:&[u8],rssi:i8,channel:u8,ts_us:u64,filter:&CaptureFilter,original_len:u32) {
-        self.latest.set(data);
         self.scan.on_frame(data,rssi,channel,ts_us/1000);
         if let Some(header)=FrameHeader::parse(data) {
             if header.fc.is_management() && matches!(header.fc.subtype,frame::subtype::BEACON | frame::subtype::PROBE_RESP) {
@@ -68,6 +67,7 @@ impl<const A:usize,const S:usize,const H:usize,const R:usize> PassiveEngine<A,S,
             }
         }
         if !filter.matches(data) {return}
+        self.latest.set(data);
         self.histogram.count(classify(data).0);
         if R==0 {return}
         let summary=PacketSummary::build(self.scan.frames,Timestamp::from_micros(ts_us),data,channel,rssi);
@@ -164,6 +164,28 @@ mod tests {
         assert_eq!(engine.frames.len(),2);assert!(engine.frames[0].metadata.contains("2000001"));
         assert!(engine.frames[0].hex.contains("0000"));assert_eq!(engine.histogram.eapol,2);
     }
+    #[test]
+    fn rejected_frames_preserve_latest_accepted_inspection() {
+        let mut engine: PassiveEngine<4, 4, 2, 2> = PassiveEngine::new();
+        let filter = super::super::CaptureFilter { data_only: true, ..Default::default() };
+        let mut data = alloc::vec![0u8; 32];
+        data[0] = 0x08;
+        data[1] = 0x01;
+        data[4..10].copy_from_slice(&[1; 6]);
+        data[10..16].copy_from_slice(&[2; 6]);
+        data[16..22].copy_from_slice(&[1; 6]);
+        data[24..32].copy_from_slice(&[0xAA, 0xAA, 3, 0, 0, 0, 8, 0]);
+        engine.on_frame(&data, -40, 1, 1_000, &filter, 32);
+        assert_eq!(engine.latest.bytes(), data.as_slice());
+        let beacon = frame::beacon_frame(b"Discovered", MacAddr([1; 6]), &frame::BeaconOptions::default());
+        engine.on_frame(beacon.as_slice(), -45, 1, 2_000, &filter, beacon.as_slice().len() as u32);
+        assert_eq!(engine.scan.aps.len(), 1, "a rejected frame still contributes passive discovery");
+        assert_eq!(engine.frames.len(), 1);
+        assert_eq!(engine.histogram.data, 1);
+        assert_eq!(engine.histogram.beacons, 0);
+        assert_eq!(engine.latest.bytes(), data.as_slice(), "inspector keeps the latest frame accepted by its filter");
+    }
+
     #[test]
     fn filter_limits_inspector_but_preserves_passive_discovery() {
         let mut engine:PassiveEngine<4,4,2,2>=PassiveEngine::new();

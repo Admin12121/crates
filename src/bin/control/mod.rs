@@ -30,8 +30,8 @@ pub fn start(tool:Tool,app:&mut App,rf:&mut RfRuntime<'_>,flags:Flags)->Result<(
   Tool::WifiBeacon|Tool::WifiDeauth=>{if s.channel==0{return Err("Choose a fixed channel for this existing test");}queued(wifi::submit(WifiCommand::Attack{mode:if tool==Tool::WifiBeacon{cyberdeck_core::wifi::attack::AttackMode::BeaconSpam}else{cyberdeck_core::wifi::attack::AttackMode::Deauth},channel:s.channel}))},
   Tool::PktFiles=>{if !sd::ready(){return Err("Insert a writable microSD card");}queued(sd::request_list())},
   Tool::BleScan=>{if !flags.ble{return Err("BLE radio unavailable");}queued(ble::submit(BleCommand::Scan))},
-  Tool::BleSpam=>{let campaign=cyberdeck_core::ble::spam::SpamCampaign::from_index(s.target.saturating_sub(1) as usize).unwrap_or(cyberdeck_core::ble::spam::SpamCampaign::IBeacon);queued(ble::submit(BleCommand::Advertise(campaign)))},
-  Tool::BleGatt=>queued(ble::submit(BleCommand::Inspect{index:s.target.saturating_sub(1)})),
+  Tool::BleSpam=>{let campaign=cyberdeck_core::ble::spam::SpamCampaign::from_index(s.target as usize).unwrap_or(cyberdeck_core::ble::spam::SpamCampaign::IBeacon);queued(ble::submit(BleCommand::Advertise(campaign)))},
+  Tool::BleGatt=>queued(ble::submit(BleCommand::Inspect{index:s.target})),
   Tool::BleHid=>queued(ble::submit(BleCommand::HidListen{payload:s.payload,layout})),
   Tool::HidIntro|Tool::HidDucky=>{if !flags.usb{return Err("Native USB HID unavailable");}queued(usb::submit(UsbCommand::RunPayload{index:s.payload,layout}))},
   Tool::RfSpectrum|Tool::RfCapture=>{

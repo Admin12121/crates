@@ -6,13 +6,14 @@
 //! "distinguish genuine USB delivery from script engine progress" requirement) and
 //! makes timing testable without a host.
 
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::ducky::{Command, MAX_COMMANDS, Script};
 use super::{ConsumerReport, KeyboardReport, Layout, MouseReport, modifier};
 
-/// Upper bound on the expanded execution plan (`REPEAT` expansion included).
+/// Legacy expanded-plan limit; compressed plans no longer truncate at this count.
 pub const MAX_PLAN: usize = 8192;
 
 /// One report destined for a HID endpoint.
@@ -36,12 +37,22 @@ pub struct EngineProgress {
     pub unsupported_chars: u32,
 }
 
+/// One stored command plus its execution count; REPEAT never clones text bodies.
+#[derive(Debug)]
+struct PlanCommand {
+    command: Rc<Command>,
+    executions: usize,
+}
+
 /// Script runner.
 #[derive(Debug)]
 pub struct HidEngine {
-    plan: Vec<Command>,
+    plan: Vec<PlanCommand>,
     layout: Layout,
     pc: usize,
+    repetition: usize,
+    command_index: usize,
+    command_total: usize,
     /// Index into the current text command.
     text_index: usize,
     /// A key was pressed and its release report is due next tick.
@@ -64,28 +75,19 @@ pub struct HidEngine {
 impl HidEngine {
     /// Build an engine from a validated script.
     pub fn new(script: &Script, layout: Layout) -> Self {
-        let mut plan: Vec<Command> = Vec::with_capacity(script.commands.len());
-        let mut truncated = false;
+        let mut plan: Vec<PlanCommand> = Vec::with_capacity(script.commands.len());
+        let mut command_total = 0;
         for command in &script.commands {
             match command {
                 Command::Repeat(times) => {
-                    let Some(previous) = plan.last().cloned() else {
-                        continue;
-                    };
-                    for _ in 0..*times {
-                        if plan.len() >= MAX_PLAN {
-                            truncated = true;
-                            break;
-                        }
-                        plan.push(previous.clone());
+                    if let Some(previous) = plan.last_mut() {
+                        previous.executions += usize::from(*times);
+                        command_total += usize::from(*times);
                     }
                 }
                 other => {
-                    if plan.len() >= MAX_PLAN {
-                        truncated = true;
-                        break;
-                    }
-                    plan.push(other.clone());
+                    plan.push(PlanCommand { command: Rc::new(other.clone()), executions: 1 });
+                    command_total += 1;
                 }
             }
         }
@@ -93,6 +95,9 @@ impl HidEngine {
             plan,
             layout,
             pc: 0,
+            repetition: 0,
+            command_index: 0,
+            command_total,
             text_index: 0,
             release_pending: false,
             release_kind: 1,
@@ -107,7 +112,7 @@ impl HidEngine {
             paused: false,
             stopped: false,
             release_all_sent: false,
-            plan_truncated: truncated,
+            plan_truncated: false,
         }
     }
 
@@ -136,8 +141,8 @@ impl HidEngine {
     }
 
     pub fn progress(&self) -> EngineProgress {
-        let total = self.plan.len();
-        let index = self.pc.min(total);
+        let total = self.command_total;
+        let index = self.command_index.min(total);
         let percent = if total == 0 {
             100
         } else {
@@ -214,15 +219,15 @@ impl HidEngine {
                 self.finished = true;
                 return None;
             }
-            let command = self.plan[self.pc].clone();
-            match command {
+            let command = Rc::clone(&self.plan[self.pc].command);
+            match command.as_ref() {
                 Command::Delay(ms) => {
-                    self.pc += 1;
-                    self.wait_until_ms = self.wait_until_ms.max(now_ms) + u64::from(ms);
+                    self.advance();
+                    self.wait_until_ms = self.wait_until_ms.max(now_ms) + u64::from(*ms);
                     return None;
                 }
                 Command::SetDefaultDelay(ms) => {
-                    self.pc += 1;
+                    self.advance();
                     self.key_delay_ms = (ms / 2).max(1);
                 }
                 Command::Text { text, enter } => {
@@ -231,7 +236,7 @@ impl HidEngine {
                         self.text_index += 1;
                         // Advance past the command as soon as its last character is
                         // emitted, so a following DELAY is folded exactly once.
-                        let exhausted = self.text_index >= text.len() && !enter;
+                        let exhausted = self.text_index >= text.len() && !*enter;
                         if let Some((keycode, shift)) = self.layout.map_char(ch) {
                             let modifiers = if shift { modifier::LEFT_SHIFT } else { 0 };
                             self.typed_chars = self.typed_chars.saturating_add(1);
@@ -239,7 +244,7 @@ impl HidEngine {
                             self.release_pending = true;
                             self.release_modifiers = modifiers;
                             if exhausted {
-                                self.pc += 1;
+                                self.advance();
                                 self.text_index = 0;
                             }
                             return Some(Output::Keyboard(KeyboardReport::new(
@@ -256,8 +261,8 @@ impl HidEngine {
                         }
                         continue;
                     }
-                    if enter {
-                        self.pc += 1;
+                    if *enter {
+                        self.advance();
                         self.text_index = 0;
                         self.keystrokes = self.keystrokes.saturating_add(1);
                         self.release_pending = true;
@@ -267,23 +272,23 @@ impl HidEngine {
                             super::key::ENTER,
                         )));
                     }
-                    self.pc += 1;
+                    self.advance();
                     self.text_index = 0;
                 }
                 Command::Key { modifiers, keycode } => {
-                    self.pc += 1;
+                    self.advance();
                     self.keystrokes = self.keystrokes.saturating_add(1);
                     self.release_pending = true;
                     self.release_modifiers = modifiers | self.held_modifiers;
                     return Some(Output::Keyboard(KeyboardReport::new(
                         self.release_modifiers,
-                        keycode,
+                        *keycode,
                     )));
                 }
                 Command::KeyDown { modifiers, keycode } => {
-                    self.pc += 1;
+                    self.advance();
                     self.held_modifiers |= modifiers;
-                    if keycode == 0 {
+                    if *keycode == 0 {
                         // Modifier-only hold: report the held modifiers.
                         return Some(Output::Keyboard(KeyboardReport {
                             modifiers: self.held_modifiers,
@@ -294,11 +299,11 @@ impl HidEngine {
                     self.release_modifiers = modifiers & !self.held_modifiers;
                     return Some(Output::Keyboard(KeyboardReport::new(
                         self.held_modifiers,
-                        keycode,
+                        *keycode,
                     )));
                 }
                 Command::KeyUp { modifiers, keycode } => {
-                    self.pc += 1;
+                    self.advance();
                     let _ = keycode;
                     self.held_modifiers &= !modifiers;
                     return Some(Output::Keyboard(KeyboardReport {
@@ -308,61 +313,73 @@ impl HidEngine {
                 }
                 Command::Media(usage) => {
                     self.release_kind = 2;
-                    self.pc += 1;
+                    self.advance();
                     self.keystrokes = self.keystrokes.saturating_add(1);
                     self.release_pending = true;
                     self.release_modifiers = 0;
-                    return Some(Output::Consumer(ConsumerReport { usage }));
+                    return Some(Output::Consumer(ConsumerReport { usage: *usage }));
                 }
                 Command::MouseMove { dx, dy } => {
-                    self.pc += 1;
+                    self.advance();
                     return Some(Output::Mouse(MouseReport {
                         buttons: 0,
-                        dx,
-                        dy,
+                        dx: *dx,
+                        dy: *dy,
                         wheel: 0,
                     }));
                 }
                 Command::MouseClick(button) => {
                     self.release_kind = 3;
-                    self.pc += 1;
+                    self.advance();
                     self.release_pending = true;
                     self.release_modifiers = 0;
                     return Some(Output::Mouse(MouseReport {
-                        buttons: button,
+                        buttons: *button,
                         dx: 0,
                         dy: 0,
                         wheel: 0,
                     }));
                 }
                 Command::MouseScroll(delta) => {
-                    self.pc += 1;
+                    self.advance();
                     return Some(Output::Mouse(MouseReport {
                         buttons: 0,
                         dx: 0,
                         dy: 0,
-                        wheel: delta,
+                        wheel: *delta,
                     }));
                 }
                 Command::Repeat(_) => {
-                    // Already expanded in the plan.
-                    self.pc += 1;
+                    // Repetition counts are stored on the preceding command.
+                    self.advance();
                 }
             }
         }
         None
     }
 
+    fn advance(&mut self) {
+        self.command_index += 1;
+        self.text_index = 0;
+        self.repetition += 1;
+        if self.repetition >= self.plan[self.pc].executions {
+            self.pc += 1;
+            self.repetition = 0;
+        }
+    }
+
     /// Fold leading `DELAY`/`DEFAULT_DELAY` commands into the wait deadline.
     fn absorb_idle_commands(&mut self, now_ms: u64) {
-        while self.pc < self.plan.len() {
-            match self.plan[self.pc].clone() {
+        for _ in 0..64 {
+            if self.pc >= self.plan.len() { break; }
+            let command = Rc::clone(&self.plan[self.pc].command);
+            match command.as_ref() {
                 Command::Delay(ms) => {
-                    self.pc += 1;
-                    self.wait_until_ms = self.wait_until_ms.max(now_ms) + u64::from(ms);
+                    self.advance();
+                    self.wait_until_ms = self.wait_until_ms.max(now_ms) + u64::from(*ms);
                 }
                 Command::SetDefaultDelay(ms) => {
-                    self.pc += 1;
+                    self.advance();
                     self.key_delay_ms = (ms / 2).max(1);
                 }
                 _ => break,

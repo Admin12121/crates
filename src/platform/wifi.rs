@@ -16,7 +16,7 @@ use cyberdeck_core::packet::{CaptureFilter,passive::PassiveEngine,storage::Sessi
 use embassy_futures::select::{select,Either};
 use cyberdeck_core::pcap::{MAX_CAPTURE_BYTES,PcapSink,PcapWriter,Radiotap,strip_fcs};
 use cyberdeck_core::time::Timestamp;
-use cyberdeck_core::wifi::ap::Ssid;
+use cyberdeck_core::wifi::ap::{Ssid,ChannelHopper};
 use cyberdeck_core::wifi::attack::{AttackMode, AttackPlan, AttackRunner};
 use cyberdeck_core::wifi::dhcp::{self,Lease};
 use cyberdeck_core::wifi::portal::{self,PortalConfig,PortalTemplate};
@@ -111,6 +111,8 @@ pub struct WifiState {
     pub busy: bool,
     pub status: String,
     pub aps: Vec<ApRow>,
+    scan_aps: Vec<ApRow>,
+    scan_ms: u64,
     pub frames: u32,
     pub bytes: u64,
     pub dropped: u32,
@@ -126,6 +128,8 @@ impl WifiState {
             busy: false,
             status: String::new(),
             aps: Vec::new(),
+            scan_aps: Vec::new(),
+            scan_ms: 0,
             frames: 0,
             bytes: 0,
             dropped: 0,
@@ -195,6 +199,11 @@ pub fn snapshot() -> (String, Vec<ApRow>, u32, u32) {
             state.dropped,
         )
     })
+}
+
+/// Last successful scan only; monitor cache updates and failed scans never refresh it.
+pub fn scan_observations()->(Vec<ApRow>,u64){
+    critical_section::with(|cs|{let state=WIFI_STATE.borrow_ref(cs);(state.scan_aps.clone(),state.scan_ms)})
 }
 
 /// Convert an esp-radio scan result into the UI row.
@@ -283,17 +292,51 @@ fn finish_session(status: &str) {
 }
 
 
+fn monitor_hopper(channel:u8)->Result<ChannelHopper,&'static str>{
+    if channel==0{return Ok(ChannelHopper::new(cyberdeck_core::net::hop_plan(1,false),300));}
+    if channel>13{return Err("channel must be 0 (hop) or 1..13");}
+    let channel=Channel::new(channel).map_err(|_|"channel must be 0 (hop) or 1..13")?;
+    Ok(ChannelHopper::fixed(channel))
+}
+
+#[cfg(test)]
+mod monitor_channel_tests {
+    use super::*;
+
+    #[test]
+    fn hop_setting_visits_all_supported_channels_with_session_relative_dwell() {
+        let mut hopper=monitor_hopper(0).expect("UI Hop setting must be accepted");
+        assert_eq!(hopper.current().unwrap().get(),1);
+        assert_eq!(hopper.poll(0),None);
+        assert_eq!(hopper.poll(299),None);
+        for (elapsed,channel) in [(300,2),(600,3),(900,4),(1200,5),(1500,6),(1800,7),(2100,8),(2400,9),(2700,10),(3000,11),(3300,12),(3600,13),(3900,1)] {
+            assert_eq!(hopper.poll(elapsed).unwrap().get(),channel);
+        }
+    }
+
+    #[test]
+    fn fixed_channels_stay_fixed_and_unsupported_channels_are_rejected() {
+        for channel in [1,6,13] {
+            let mut hopper=monitor_hopper(channel).unwrap();
+            assert_eq!(hopper.current().unwrap().get(),channel);
+            assert_eq!(hopper.poll(300),None);
+            assert_eq!(hopper.poll(3900),None);
+        }
+        for channel in [14,15,255] {assert!(monitor_hopper(channel).is_err());}
+    }
+}
 async fn capture_session(controller:&mut WifiController<'static>,channel:u8){
     monitor_session(controller,channel,CaptureFilter::default(),true,false).await;
 }
 async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filter:CaptureFilter,record:bool,stream:bool){
-    if Channel::new(channel).is_err(){set_status("channel must be 1..13");return}
+    let Ok(mut hopper)=monitor_hopper(channel)else{set_status("channel must be 0 (hop) or 1..13");return};
     if !disconnect(controller).await{return}
     if stop_requested(){set_status("capture cancelled");return}
-    if let Err(e)=controller.set_channel(channel,SecondaryChannel::None){set_status(&alloc::format!("channel tune failed: {e:?}"));return}
+    let Some(initial_channel)=hopper.current()else{set_status("no capture channels configured");return};
+    if let Err(e)=controller.set_channel(initial_channel.get(),SecondaryChannel::None){set_status(&alloc::format!("channel tune failed: {e:?}"));return}
     if stream&&!super::usb::pcap_start(){set_status("USB CDC host not connected or stream busy");return}
     if record&&!super::sd::ready(){set_status("capture requires mounted SD; use live observer");return}
-    reset_counters(channel);set_status(&alloc::format!("monitor channel {channel}: {}",filter.describe()));
+    reset_counters(initial_channel.get());
     let name=if record{super::sd::next_name("CAPTURE","PCAP")}else{String::new()};
     let mut pcap=if record||stream{
         match PcapWriter::new(ChunkSink::new(name.clone(),stream),(SNAP_LEN+Radiotap::LEN)as u32,true,MAX_CAPTURE_BYTES){
@@ -302,7 +345,9 @@ async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filt
     }else{None};
     let mut sniffer=controller.sniffer();sniffer.set_receive_cb(receive);
     if let Err(e)=sniffer.set_promiscuous_mode(true){if stream{super::usb::pcap_finish();}set_status(&alloc::format!("sniffer unavailable: {e:?}"));return}
-    let mut error=None;let mut last_publish=embassy_time::Instant::now();
+    set_status(&if channel==0{alloc::format!("monitor hopping 1..13 (channel {}): {}",initial_channel.get(),filter.describe())}else{alloc::format!("monitor channel {channel}: {}",filter.describe())});
+    let session_start=embassy_time::Instant::now();
+    let mut error=None;let mut last_publish=session_start;
     'session:loop{
         if stop_requested(){break}
         // A bounded batch yields to the UI and storage even under a saturated channel.
@@ -320,6 +365,14 @@ async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filt
                 }
             }
             if stop_requested(){break 'session}
+        }
+        if channel==0{
+            if let Some(next)=hopper.poll(session_start.elapsed().as_millis()){
+                let primary=next.get();
+                if let Err(e)=controller.set_channel(primary,SecondaryChannel::None){error=Some(alloc::format!("channel tune failed: {e:?}"));break 'session}
+                critical_section::with(|cs|WIFI_STATE.borrow_ref_mut(cs).channel=primary);
+                set_status(&alloc::format!("monitor hopping 1..13 (channel {primary}): {}",filter.describe()));
+            }
         }
         critical_section::with(|cs|WIFI_STATE.borrow_ref_mut(cs).dropped=RX.borrow_ref(cs).dropped);
         if last_publish.elapsed()>=embassy_time::Duration::from_millis(250){
@@ -583,7 +636,8 @@ async fn scan_session(controller:&mut WifiController<'static>){
             let mut rows:Vec<ApRow>=results.iter().map(to_row).collect();
             rows.sort_by_key(|r|-i16::from(r.rssi));rows.truncate(MAX_APS);
             let count=rows.len();let queued=super::export::save_wifi_findings(&rows);
-            critical_section::with(|cs|{let mut state=WIFI_STATE.borrow_ref_mut(cs);state.aps=rows;state.status=alloc::format!("{count} access points; {}",if queued{"inventory export queued"}else{"inventory retained"});});
+            let observed_ms=embassy_time::Instant::now().as_millis();
+            critical_section::with(|cs|{let mut state=WIFI_STATE.borrow_ref_mut(cs);state.scan_aps=rows.clone();state.scan_ms=observed_ms;state.aps=rows;state.status=alloc::format!("{count} access points; {}",if queued{"inventory export queued"}else{"inventory retained"});});
         }
         Either::First(Err(e))=>set_status(&alloc::format!("scan failed: {e:?}")),
         Either::Second(())=>set_status(if stop_requested(){"scan cancelled"}else{"scan timeout"}),

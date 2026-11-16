@@ -203,6 +203,97 @@ mod tests {
         for _ in 0..70{app.handle(Button::Select);assert!((1..=32).contains(&app.settings().rf_payload_len));}
     }
 
+    fn open_setup(group: usize, tool: usize) -> App {
+        let mut app = App::new(registry());
+        for _ in 0..group { app.handle(Button::Down); }
+        app.handle(Button::Select);
+        for _ in 0..tool { app.handle(Button::Down); }
+        app.handle(Button::Select);
+        app
+    }
+
+    fn scanned_ap(name: &str) -> platform::wifi::ApRow {
+        platform::wifi::ApRow {
+            ssid: name.into(),
+            bssid: cyberdeck_core::net::MacAddr::new([1; 6]),
+            channel: 1,
+            rssi: -50,
+            security: "WPA2",
+        }
+    }
+
+    #[test]
+    fn scanned_network_selection_starts_with_first_ap() {
+        let mut app = open_setup(6, 0);
+        let mut live = Live::default();
+        live.aps = vec![scanned_ap("First"), scanned_ap("Second")];
+        app.set_live(live);
+        app.handle(Button::Down);
+        app.handle(Button::Select);
+        assert_eq!(app.network_credentials().0, "First");
+        app.handle(Button::Select);
+        assert_eq!(app.network_credentials().0, "Second");
+    }
+
+    #[test]
+    fn scanned_network_selection_normalizes_reused_host_target() {
+        let mut app = open_setup(6, 2);
+        app.handle(Button::Down);
+        for _ in 0..5 { app.handle(Button::Select); }
+        assert_eq!(app.settings().target, 6);
+        app.handle(Button::Home);
+        app.handle(Button::Select);
+        app.handle(Button::Select);
+        let mut live = Live::default();
+        live.aps = vec![scanned_ap("Only network")];
+        app.set_live(live);
+        app.handle(Button::Down);
+        app.handle(Button::Select);
+        assert_eq!(app.network_credentials().0, "Only network");
+        assert_eq!(app.settings().target, 0);
+    }
+
+    #[test]
+    fn gatt_details_render_in_live_and_saved_results() {
+        let mut app = open_setup(2, 2);
+        assert_eq!(app.handle(Button::Select), Action::Start(app::Tool::BleGatt));
+        let mut live = Live::default();
+        live.ble_status = "GATT inspection complete".into();
+        live.packet_lines = vec!["Service 180F".into(), "  Characteristic 2A19".into()];
+        app.set_live(live);
+        let mut canvas = TestCanvas::new(240, 320);
+        app.render(&mut canvas);
+        assert!(canvas.text.contains("Service 180F"));
+        assert!(canvas.text.contains("Characteristic 2A19"));
+        assert_eq!(app.handle(Button::Back), Action::Stop);
+        app.set_live(Live::default());
+        let mut canvas = TestCanvas::new(240, 320);
+        app.render(&mut canvas);
+        assert!(canvas.text.contains("Service 180F"));
+        assert!(canvas.text.contains("Characteristic 2A19"));
+    }
+
+    #[test]
+    fn ble_hid_renders_delivery_status_progress_and_pause() {
+        let mut app = open_setup(2, 3);
+        assert_eq!(app.handle(Button::Select), Action::Start(app::Tool::BleHid));
+        let mut live = Live::default();
+        live.ble_status = "Keyboard advertising".into();
+        live.usb_status = "Delivering selected script".into();
+        live.usb_percent = 62;
+        live.usb_keystrokes = 24;
+        live.usb_unsupported = 3;
+        app.set_live(live);
+        assert_eq!(app.handle(Button::Select), Action::Pause(true));
+        let mut canvas = TestCanvas::new(240, 320);
+        app.render(&mut canvas);
+        for text in ["Delivering selected script", "62%", "24 KEYS", "3 UNSUPPORTED", "PAUSED"] {
+            assert!(canvas.text.contains(text), "missing BLE HID status: {text}");
+        }
+        assert_eq!(app.handle(Button::Select), Action::Pause(false));
+        assert_eq!(app.handle(Button::Back), Action::Stop);
+    }
+
     #[test]
     fn wrapped_long_word_after_prefix_stays_within_width() {
         let lines=cyberdeck_core::ui::wrap("short ABCDEFGHIJKLMNOPQRSTUVWXYZ tail",10);

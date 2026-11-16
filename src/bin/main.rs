@@ -480,8 +480,8 @@ async fn main(spawner: Spawner) -> ! {
                     if active_tool==Some(Tool::BleHid){ble::submit(if paused{BleCommand::HidPause}else{BleCommand::HidResume});}
                     else{usb::submit(if paused{UsbCommand::Pause}else{UsbCommand::Resume});}
                 },
-                Action::FilePreview(index)=>{file_action=Some((index.saturating_sub(1) as usize,false));sd::request_list();},
-                Action::FileRecover(index)=>{file_action=Some((index.saturating_sub(1) as usize,true));sd::request_list();},
+                Action::FilePreview(index)=>{file_action=Some((index as usize,false));sd::request_list();},
+                Action::FileRecover(index)=>{file_action=Some((index as usize,true));sd::request_list();},
                 Action::None=>{},
             }
         }
@@ -510,7 +510,7 @@ async fn main(spawner: Spawner) -> ! {
                     app.set_message(if accepted{"File operation queued"}else{"Storage busy; retry"});
                 }else{app.set_message("Select a file number from the capture library");}
                 file_action=None;
-            }else if status.contains("empty")||status.contains("failed")||status.contains("unavailable"){app.set_message(&status);file_action=None;}
+            }else if status.starts_with("0 files")||status.contains("empty")||status.contains("failed")||status.contains("unavailable"){app.set_message(&status);file_action=None;}
         }
         rf.step(now_ms);
         if payload::sync_from_storage(){refresh_payloads(&mut app);}
@@ -561,7 +561,7 @@ async fn main(spawner: Spawner) -> ! {
             app.set_live(live);
             if now_ms.saturating_sub(started_ms)>300 {
                 let finished=match active_tool{
-                    Some(Tool::WifiScan) if !wifi::busy()=>Some(wifi_status.as_str()),
+                    Some(Tool::WifiScan|Tool::WifiCapture|Tool::WifiHandshake|Tool::WifiWps|Tool::WifiClients|Tool::PktCapture|Tool::PktAnalyse|Tool::PktStream) if !wifi::busy()=>Some(wifi_status.as_str()),
                     Some(Tool::NetInfo|Tool::NetDiscover|Tool::NetProbe|Tool::NetServices) if !net_busy=>Some(net_status.as_str()),
                     Some(Tool::HidIntro|Tool::HidDucky) if usb_status=="script delivered"||usb_status.starts_with("USB delivery failed")||usb_status.starts_with("parse")=>Some(usb_status.as_str()),
                     Some(Tool::BleGatt) if !ble::busy()=>Some(ble_status.as_str()),

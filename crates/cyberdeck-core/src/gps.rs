@@ -107,3 +107,39 @@ pub struct WardriveObservation<'a>{pub address:&'a str,pub name:&'a str,pub auth
 pub fn wigle_header()->&'static str{"WigleWifi-1.4,appRelease=0.1,model=Admin12121,release=0.1,device=ESP32S3,display=Admin12121,board=FIELD,brand=Admin12121\nMAC,SSID,AuthMode,FirstSeen,Channel,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type\n"}
 pub fn utc_datetime(fix:&Fix)->Option<String>{if !valid_date(&fix.utc_date)||!valid_clock(&fix.utc_time){return None;}let date=&fix.utc_date;let year=date[4..6].parse::<u16>().ok()?;let year=if year<80{2000+year}else{1900+year};Some(format!("{year}-{}-{} {}:{}:{}",&date[2..4],&date[..2],&fix.utc_time[..2],&fix.utc_time[2..4],&fix.utc_time[4..6]))}
 pub fn wigle_row(fix:&Fix,observation:&WardriveObservation<'_>)->Option<String>{let time=utc_datetime(fix)?;let name=observation.name.replace('"',"\"\"").replace(['\r','\n']," ");Some(format!("{},\"{}\",{},{},{},{},{},{},{}.{},0,{}\n",observation.address,name,observation.auth,time,observation.channel,observation.rssi,fix.latitude(),fix.longitude(),fix.altitude_dm/10,fix.altitude_dm.unsigned_abs()%10,observation.kind))}
+
+/// Recent valid fixes used to correlate a radio observation with its receive time.
+pub struct FixHistory<const N: usize> { fixes: Vec<Fix> }
+impl<const N: usize> Default for FixHistory<N> { fn default()->Self {Self::new()} }
+impl<const N: usize> FixHistory<N> {
+    pub fn new()->Self {Self {fixes:Vec::new()}}
+    pub fn push(&mut self, fix:&Fix) {
+        if N==0 {return;}
+        if let Some(previous)=self.fixes.iter_mut().find(|f|f.received_ms==fix.received_ms) {*previous=fix.clone();return;}
+        if self.fixes.len()>=N {self.fixes.remove(0);}
+        self.fixes.push(fix.clone());
+    }
+    pub fn closest(&self, observed_ms:u64, max_delta_ms:u64)->Option<&Fix> {
+        self.fixes.iter().rev().filter(|fix|fix.received_ms.abs_diff(observed_ms)<=max_delta_ms)
+            .min_by_key(|fix|fix.received_ms.abs_diff(observed_ms))
+    }
+    pub fn len(&self)->usize {self.fixes.len()}
+    pub fn is_empty(&self)->bool {self.fixes.is_empty()}
+}
+/// Bounded receive-time cursor: a cached row can only be exported once.
+pub struct ObservationCursor<const N:usize> { seen:Vec<(String,u64)> }
+impl<const N:usize> Default for ObservationCursor<N> {fn default()->Self {Self::new()}}
+impl<const N:usize> ObservationCursor<N> {
+    pub fn new()->Self {Self {seen:Vec::new()}}
+    pub fn accept(&mut self,key:&str,observed_ms:u64,now_ms:u64,max_age_ms:u64)->bool {
+        if N==0 || observed_ms>now_ms || now_ms-observed_ms>max_age_ms {return false;}
+        if let Some((_,last))=self.seen.iter_mut().find(|(known,_)|known==key) {
+            if observed_ms<=*last {return false;}
+            *last=observed_ms;return true;
+        }
+        if self.seen.len()>=N {self.seen.remove(0);}
+        self.seen.push((String::from(key),observed_ms));true
+    }
+    pub fn len(&self)->usize {self.seen.len()}
+    pub fn is_empty(&self)->bool {self.seen.is_empty()}
+}

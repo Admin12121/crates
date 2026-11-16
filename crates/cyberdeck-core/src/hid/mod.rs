@@ -259,7 +259,7 @@ impl KeyboardReport {
     pub fn to_bytes(&self) -> [u8; 8] {
         let mut out = [0u8; 8];
         out[0] = self.modifiers;
-        out[1..7].copy_from_slice(&self.keycodes);
+        out[2..8].copy_from_slice(&self.keycodes);
         out
     }
 
@@ -410,8 +410,7 @@ mod tests {
         let report = KeyboardReport::new(modifier::LEFT_CTRL | modifier::LEFT_ALT, key::DELETE);
         let bytes = report.to_bytes();
         assert_eq!(bytes[0], 0x05);
-        assert_eq!(bytes[1], key::DELETE);
-        assert!(bytes[2..].iter().all(|b| *b == 0));
+        assert_eq!(bytes, [0x05, 0, key::DELETE, 0, 0, 0, 0, 0]);
         assert!(!report.is_empty());
         assert!(KeyboardReport::default().is_empty());
     }

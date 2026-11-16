@@ -235,8 +235,11 @@ impl App {
             Field::RfLength=>self.settings.rf_payload_len=self.settings.rf_payload_len%32+1,
             Field::FileRecover=>{},
             Field::Network=>if !self.live.aps.is_empty() {
-                if !self.ssid.is_empty(){self.settings.target=((usize::from(self.settings.target)+1)%self.live.aps.len()) as u8;}
-                self.ssid=self.live.aps[usize::from(self.settings.target)].ssid.clone();
+                // The shared target may still be a host octet or an index from an older scan.
+                let target=usize::from(self.settings.target).min(self.live.aps.len()-1);
+                let target=if self.ssid.is_empty(){target}else{(target+1)%self.live.aps.len()};
+                self.settings.target=target as u8;
+                self.ssid=self.live.aps[target].ssid.clone();
             },
             Field::Ssid|Field::Password=>{let password=field==Field::Password;self.edit_text=if password {self.password.clone()}else{self.ssid.clone()};self.edit_char=b'a';self.screen=Screen::Edit(tool,password);},
             Field::Previous=>{self.screen=Screen::Results(tool);self.scroll=0;},
@@ -255,7 +258,7 @@ impl App {
             Screen::Group(group)=>match button {
                 Button::Down=>self.tool_index=(self.tool_index+1)%group.tools().len(),
                 Button::Up=>self.tool_index=(self.tool_index+group.tools().len()-1)%group.tools().len(),
-                Button::Select=>{let tool=group.tools()[self.tool_index];if group==Group::Network{self.settings.target=self.settings.target.clamp(1,254);}self.setup_index=0;self.scroll=0;self.settings.channel=self.settings.channel.min(if group==Group::Rf {125}else{13});self.screen=if self.unavailable(tool).is_some(){Screen::Unavailable(tool)}else{Screen::Setup(tool)};},
+                Button::Select=>{let tool=group.tools()[self.tool_index];if matches!(tool,Tool::NetDiscover|Tool::NetProbe|Tool::NetServices){self.settings.target=self.settings.target.clamp(1,254);}self.setup_index=0;self.scroll=0;self.settings.channel=self.settings.channel.min(if group==Group::Rf {125}else{13});self.screen=if self.unavailable(tool).is_some(){Screen::Unavailable(tool)}else{Screen::Setup(tool)};},
                 Button::Back|Button::Home=>self.screen=Screen::Home,
             },
             Screen::Setup(tool)=>match button {
@@ -322,20 +325,25 @@ impl App {
                 lines.extend(live.packet_lines.iter().take(128).cloned());
             },
             Group::Ble=>{
-                lines.push(live.ble_status.clone());
-                for device in live.ble_devices.iter().take(32) {
-                    let name=if device.name.is_empty(){"UNNAMED"}else{device.name.as_str()};
-                    lines.push(format!("{name}  {}DBM  {}",device.rssi,device.kind));
+                if tool==Tool::BleHid {
+                    lines.push(live.usb_status.clone());
+                } else {
+                    lines.push(live.ble_status.clone());
+                    if tool==Tool::BleGatt {lines.extend(live.packet_lines.iter().take(128).cloned());}
+                    for device in live.ble_devices.iter().take(32) {
+                        let name=if device.name.is_empty(){"UNNAMED"}else{device.name.as_str()};
+                        lines.push(format!("{name}  {}DBM  {}",device.rssi,device.kind));
+                    }
                 }
             },
-            Group::UsbHid=>{
-                lines.push(live.usb_status.clone());
-                if live.usb_paused{lines.push(String::from("PAUSED"));}
-                if live.usb_unsupported>0 {lines.push(format!("{} UNSUPPORTED",live.usb_unsupported));}
-            },
+            Group::UsbHid=>lines.push(live.usb_status.clone()),
             Group::Rf=>lines.push(format!("{} DROPPED",live.rf_dropped)),
             Group::Gps=>lines.extend(live.gps_lines.iter().take(128).cloned()),
             Group::Network=>lines.extend(live.net_lines.iter().take(128).cloned()),
+        }
+        if tool.is_pausable() {
+            if live.usb_paused{lines.push(String::from("PAUSED"));}
+            if live.usb_unsupported>0 {lines.push(format!("{} UNSUPPORTED",live.usb_unsupported));}
         }
         lines.extend(live.result_lines.iter().take(128).cloned());
         if let Some(status)=&live.export_status{lines.push(status.clone());}
