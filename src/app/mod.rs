@@ -124,19 +124,33 @@ impl Live {
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Screen { Splash, Home, Group(Group), Setup(Tool), Running(Tool), Results(Tool), Unavailable(Tool), Edit(Tool,bool), Diagnostics }
+enum Screen { Splash, CategoryIntro(usize), Group(Group), Setup(Tool), Running(Tool), Results(Tool), Unavailable(Tool), Edit(Tool,bool), Diagnostics }
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 enum Field { Run, Channel, Filter, Layout, Payload, Target, Stream, Network, Ssid, Password, Previous, RfRate, RfLength, FileRecover, Campaign }
+const SIN5:[u16;19]=[0,22,44,66,88,108,128,147,165,181,196,210,222,232,241,247,252,255,256];
 pub struct App {
-    screen:Screen,home_index:usize,tool_index:usize,setup_index:usize,scroll:usize,
+    screen:Screen,tool_index:usize,setup_index:usize,scroll:usize,
     registry:PeripheralRegistry,live:Live,settings:Settings,availability:Vec<(Tool,Option<String>)>,payloads:Vec<String>,
     ssid:String,password:String,edit_text:String,edit_char:u8,
     results:Option<(Tool,Live)>,needs_render:bool,last_rendered:Option<Screen>,last_selection:usize,last_page:usize,last_notice:bool,columns:usize,
-    splash_start:u64,splash_elapsed:u64,splash_reveal:usize,
+    splash_start:u64,splash_elapsed:u64,splash_reveal:usize,intro_start:u64,intro_elapsed:u64,anim_now:u64,
 }
 impl App {
     pub fn new(registry:PeripheralRegistry)->Self {
-        Self {screen:Screen::Home,splash_start:0,splash_elapsed:0,splash_reveal:0,home_index:0,tool_index:0,setup_index:0,scroll:0,registry,live:Live::default(),settings:Settings::default(),availability:Vec::new(),payloads:Vec::new(),ssid:String::new(),password:String::new(),edit_text:String::new(),edit_char:b'a',results:None,needs_render:true,last_rendered:None,last_selection:0,last_page:usize::MAX,last_notice:false,columns:36}
+        Self {screen:Screen::CategoryIntro(0),splash_start:0,splash_elapsed:0,splash_reveal:0,intro_start:0,intro_elapsed:0,anim_now:0,tool_index:0,setup_index:0,scroll:0,registry,live:Live::default(),settings:Settings::default(),availability:Vec::new(),payloads:Vec::new(),ssid:String::new(),password:String::new(),edit_text:String::new(),edit_char:b'a',results:None,needs_render:true,last_rendered:None,last_selection:0,last_page:usize::MAX,last_notice:false,columns:36}
+    }
+    pub fn intro_active(&self)->bool {matches!(self.screen,Screen::CategoryIntro(_))}
+    /// Wall clock for screens that need one. The category intro draws once and
+    /// stays put (no refresh loop); after 5 s it self-advances to the tool list
+    /// so a dead button can never trap the user on it.
+    pub fn set_anim_clock(&mut self,now:u64) {
+        self.anim_now=now;
+        if let Screen::CategoryIntro(index)=self.screen {
+            self.intro_elapsed=now.saturating_sub(self.intro_start);
+            if self.intro_elapsed>=5000 {
+                self.scroll=0;self.tool_index=0;self.screen=Screen::CategoryIntro(index);self.needs_render=true;
+            }
+        }
     }
     /// Show the boot splash; `splash_tick` drives its reveal and auto-dismiss.
     pub fn enter_splash(&mut self,now:u64) {
@@ -149,8 +163,9 @@ impl App {
         // One boot line every 120 ms after the logo has had a moment on screen.
         self.splash_reveal=usize::try_from(self.splash_elapsed.saturating_sub(300)/120).unwrap_or(usize::MAX);
         self.needs_render=true;
-        if self.splash_elapsed>=2600 {self.screen=Screen::Home;self.needs_render=true;}
+        if self.splash_elapsed>=2600 {self.screen=Screen::CategoryIntro(0);self.needs_render=true;}
     }
+    fn group_index(group:Group)->usize {GROUPS.iter().position(|g|*g==group).unwrap_or(0)}
     /// Per-category accent color.
     fn group_accent(group:Group)->Rgb565 {
         match group {
@@ -308,17 +323,19 @@ impl App {
         use crate::platform::Button;
         self.needs_render=true;
         match self.screen {
-            Screen::Splash=>{self.screen=Screen::Home;}
-            Screen::Home=>match button {
-                Button::Down=>self.home_index=(self.home_index+1)%8,Button::Up=>self.home_index=(self.home_index+7)%8,
-                Button::Select=>{self.scroll=0;self.tool_index=0;self.screen=if self.home_index<7 {Screen::Group(GROUPS[self.home_index])}else{Screen::Diagnostics};},
-                _=>{},
+            Screen::Splash=>{self.screen=Screen::CategoryIntro(0);}
+            // The intro IS the menu: up/down switches module, select opens it.
+            Screen::CategoryIntro(index)=>match button {
+                Button::Up=>{self.scroll=0;self.screen=Screen::CategoryIntro((index+7)%8);}
+                Button::Down=>{self.scroll=0;self.screen=Screen::CategoryIntro((index+1)%8);}
+                Button::Select=>{self.scroll=0;self.tool_index=0;self.screen=if index<7 {Screen::Group(GROUPS[index])}else{Screen::Diagnostics};}
+                _=>{}
             },
             Screen::Group(group)=>match button {
                 Button::Down=>self.tool_index=(self.tool_index+1)%group.tools().len(),
                 Button::Up=>self.tool_index=(self.tool_index+group.tools().len()-1)%group.tools().len(),
                 Button::Select=>{let tool=group.tools()[self.tool_index];if matches!(tool,Tool::NetDiscover|Tool::NetProbe|Tool::NetServices){self.settings.target=self.settings.target.clamp(1,254);}self.setup_index=0;self.scroll=0;self.settings.channel=self.settings.channel.min(if group==Group::Rf {125}else{13});self.screen=if self.unavailable(tool).is_some(){Screen::Unavailable(tool)}else{Screen::Setup(tool)};},
-                Button::Back|Button::Home=>self.screen=Screen::Home,
+                Button::Back|Button::Home=>{self.scroll=0;self.screen=Screen::CategoryIntro(Self::group_index(group));}
             },
             Screen::Setup(tool)=>match button {
                 Button::Up=>{let len=self.fields(tool).len();self.setup_index=(self.setup_index+len-1)%len;},
@@ -332,14 +349,14 @@ impl App {
                         }
                     } else if field==Field::FileRecover {return Action::FileRecover(self.settings.target);} else {self.change_field(field,tool);}
                 },
-                Button::Back=>self.screen=Screen::Group(tool.group()),Button::Home=>self.screen=Screen::Home,
+                Button::Back=>self.screen=Screen::Group(tool.group()),Button::Home=>{self.scroll=0;self.screen=Screen::CategoryIntro(Self::group_index(tool.group()));},
             },
             Screen::Edit(tool,password)=>match button {
                 Button::Up=>self.edit_char=if self.edit_char>=126 {31}else{self.edit_char+1},
                 Button::Down=>self.edit_char=if self.edit_char<=31 {126}else{self.edit_char-1},
                 Button::Select=>if self.edit_char==31 {self.edit_text.pop();}else if self.edit_text.len()<if password {63}else{32} {self.edit_text.push(self.edit_char as char);},
                 Button::Back=>{if password {self.password=self.edit_text.clone();}else{self.ssid=self.edit_text.clone();}self.edit_text.clear();self.screen=Screen::Setup(tool);},
-                Button::Home=>{self.edit_text.clear();self.screen=Screen::Setup(tool);},
+                Button::Home=>{self.edit_text.clear();self.screen=Screen::CategoryIntro(Self::group_index(tool.group()));},
             },
             Screen::Running(tool)=>match button {
                 Button::Up if tool==Tool::PktFiles=>{let count=self.live.capture_files.len().max(1);self.settings.target=((usize::from(self.settings.target)+count-1)%count) as u8;},
@@ -347,16 +364,18 @@ impl App {
                 Button::Select if tool==Tool::PktFiles=>return Action::FilePreview(self.settings.target),
                 Button::Up=>self.scroll=self.scroll.saturating_sub(1),Button::Down=>self.scroll=(self.scroll+1).min(self.scroll_limit(&self.lines(tool,&self.live))),
                 Button::Select if tool.is_pausable()=>{self.live.usb_paused= !self.live.usb_paused;return Action::Pause(self.live.usb_paused);},
-                Button::Select|Button::Back|Button::Home=>{self.save_results(tool);self.scroll=0;self.screen=if matches!(button,Button::Home){Screen::Home}else{Screen::Results(tool)};return Action::Stop;},
+                Button::Select=>{self.save_results(tool);self.scroll=0;self.screen=Screen::Results(tool);return Action::Stop;},
+                Button::Back=>{self.save_results(tool);self.scroll=0;self.screen=Screen::Results(tool);return Action::Stop;},
+                Button::Home=>{self.save_results(tool);self.scroll=0;self.screen=Screen::CategoryIntro(Self::group_index(tool.group()));return Action::Stop;},
             },
             Screen::Results(tool)=>match button {
                 Button::Up=>self.scroll=self.scroll.saturating_sub(1),Button::Down=>{let live=self.results.as_ref().map(|result|&result.1).unwrap_or(&self.live);self.scroll=(self.scroll+1).min(self.scroll_limit(&self.lines(tool,live)));},
-                Button::Select=>{self.setup_index=0;self.screen=Screen::Setup(tool);},Button::Back=>self.screen=Screen::Group(tool.group()),Button::Home=>self.screen=Screen::Home,
+                Button::Select=>{self.setup_index=0;self.screen=Screen::Setup(tool);},Button::Back|Button::Home=>{self.scroll=0;self.screen=Screen::CategoryIntro(Self::group_index(tool.group()));},
             },
-            Screen::Unavailable(tool)=>match button {Button::Home=>self.screen=Screen::Home,Button::Back|Button::Select=>self.screen=Screen::Group(tool.group()),_=>{}},
+            Screen::Unavailable(tool)=>match button {Button::Home|Button::Back|Button::Select=>{self.scroll=0;self.screen=Screen::CategoryIntro(Self::group_index(tool.group()));},_=>{}},
             Screen::Diagnostics=>match button {
                 Button::Up=>self.scroll=self.scroll.saturating_sub(1),Button::Down=>self.scroll=(self.scroll+1).min(self.live.probe_lines.len().saturating_sub(1)),
-                Button::Back|Button::Home|Button::Select=>self.screen=Screen::Home,
+                Button::Back|Button::Home|Button::Select=>{self.scroll=0;self.screen=Screen::CategoryIntro(7);},
             },
         }
         Action::None
@@ -533,38 +552,20 @@ impl App {
         canvas.fill_rect(Rect::new(x,y,2,thumb),theme::TEXT_DIM);
     }
     /// Pictogram per module, drawn from filled rectangles: no image assets needed.
-    fn home_icon(canvas:&mut impl Canvas,x:i16,y:i16,index:usize,fg:Rgb565,bg:Rgb565) {
-        canvas.fill_rect(Rect::new(x,y,14,14),bg);
-        let mut bar=|dx:i16,dy:i16,w:u16,h:u16| canvas.fill_rect(Rect::new(x+dx,y+dy,w,h),fg);
-        match index {
-            // Wi-Fi: descending signal bars with a dot.
-            0=>{bar(0,1,14,2);bar(2,5,10,2);bar(4,9,6,2);bar(6,12,2,1);}
-            // Packet: stacked capture layers.
-            1=>{bar(0,2,14,2);bar(1,6,12,2);bar(2,10,10,2);}
-            // Bluetooth: rune.
-            2=>{bar(6,0,2,14);bar(8,2,2,2);bar(10,4,2,2);bar(8,6,2,2);bar(8,8,2,2);bar(10,10,2,2);bar(3,5,2,3);bar(5,7,2,2);}
-            // USB: trident.
-            3=>{bar(6,2,2,10);bar(5,12,4,2);bar(4,0,6,2);bar(1,6,5,2);bar(1,4,2,2);bar(8,8,5,2);bar(11,6,2,2);}
-            // RF: mast with two wave pairs.
-            4=>{bar(6,6,2,8);bar(3,3,2,7);bar(9,3,2,7);bar(0,1,2,11);bar(12,1,2,11);}
-            // GPS: crosshair.
-            5=>{bar(0,6,14,2);bar(6,0,2,14);bar(4,4,2,2);bar(8,4,2,2);bar(4,8,2,2);bar(8,8,2,2);}
-            // Network: three linked nodes.
-            6=>{bar(1,1,4,4);bar(9,1,4,4);bar(5,9,4,4);bar(5,4,1,3);bar(2,5,10,1);bar(6,7,1,2);}
-            // Diagnostics: pulse trace.
-            _=>{bar(0,6,3,2);bar(3,3,2,7);bar(5,8,2,2);bar(7,4,2,5);bar(9,6,5,2);}
-        }
-    }
     /// Selection moves repaint only old/new cards unless the page changed.
     pub fn render(&mut self,canvas:&mut impl Canvas) {
         self.columns=usize::from(canvas.width().saturating_sub(24)/6).max(1);
         if self.screen==Screen::Splash {self.render_splash(canvas);self.last_rendered=Some(self.screen);self.last_selection=0;self.last_page=0;self.last_notice=false;return;}
+        if let Screen::CategoryIntro(index)=self.screen {
+            // Static intro: drawn once, self-advances, keeps input responsive.
+            self.render_intro(canvas,index);
+            self.last_rendered=Some(self.screen);self.last_selection=0;self.last_page=0;self.last_notice=false;return;
+        }
         let changed=self.last_rendered!=Some(self.screen)||self.last_notice!=self.live.message.is_some();
         if changed {canvas.fill_rect(Rect::new(0,0,canvas.width(),canvas.height()),theme::BACKGROUND);}
         let spinner=['/','-','\\','|'][usize::from(self.live.tick)%4];
         let (title,subtitle)=match self.screen {
-            Screen::Splash=>(String::new(),String::new()),
-            Screen::Home=>(cyberdeck_core::DEVICE_NAME.into(),String::new()),
+            Screen::Splash|Screen::CategoryIntro(_)=>(String::new(),String::new()),
             Screen::Group(group)=>(group.title().into(),String::new()),
             Screen::Setup(tool)=>(tool.title().into(),String::from("SETTINGS")),
             Screen::Running(tool)=>(tool.title().into(),if self.live.usb_paused{String::from("PAUSED")}else{alloc::format!("{spinner} LIVE")}),
@@ -576,41 +577,7 @@ impl App {
         self.header(canvas,&title,&subtitle);
         let mut selection=0;let mut page=0;
         match self.screen {
-            Screen::Splash=>{}
-            Screen::Home=>{
-                selection=self.home_index;
-                let columns=if canvas.width()>=200{2}else{1};
-                let rows=((self.bottom(canvas)-50).max(58) as usize/58).max(1);
-                let count=rows*columns;page=self.home_index/count;
-                let full=changed||page!=self.last_page||self.live.message.is_some();
-                if full {canvas.fill_rect(Rect::new(0,45,canvas.width(),canvas.height().saturating_sub(65)),theme::BACKGROUND);}
-                let gap=8u16;
-                let tile_w=canvas.width().saturating_sub(16).saturating_sub(gap*(columns as u16-1))/columns as u16;
-                for slot in 0..count {
-                    let index=page*count+slot;if index>=8{break;}
-                    if !full&&index!=self.home_index&&index!=self.last_selection{continue;}
-                    let x=8+(slot%columns) as i16*(tile_w as i16+gap as i16);let y=50+(slot/columns) as i16*58;
-                    let selected=index==self.home_index;
-                    let bg=if selected{theme::SURFACE_ALT}else{theme::SURFACE};
-                    let accent=if index<7 {Self::group_accent(GROUPS[index])}else{theme::TEXT_DIM};
-                    canvas.fill_rect(Rect::new(x,y,tile_w,52),bg);
-                    if selected {canvas.fill_rect(Rect::new(x,y,2,52),accent);}
-                    let label=if index<7 {GROUPS[index].title()}else{"Diagnostics"};
-                    let icon_color=if selected {accent}else{theme::TEXT_DIM};
-                    // Hardware state reads at a glance: green ready, red fault, grey unknown.
-                    let dot=if index>=7 {theme::TEXT_DIM} else {
-                        match self.registry.state(GROUPS[index].device()) {
-                            Some(DeviceState::Ready)=>theme::SUCCESS,
-                            Some(_)=>theme::DANGER,
-                            None=>theme::TEXT_DIM,
-                        }
-                    };
-                    canvas.fill_rect(Rect::new(x+tile_w as i16-8,y+7,3,3),dot);
-                    Self::home_icon(canvas,x+12,y+19,index,icon_color,bg);
-                    Self::text(canvas,x+34,y+22,tile_w.saturating_sub(42),label,if selected{theme::TEXT}else{theme::TEXT_DIM},bg,1);
-                }
-                if full {Self::page_indicator(canvas,page,8_usize.div_ceil(count),50,self.bottom(canvas));}
-            },
+            Screen::Splash|Screen::CategoryIntro(_)=>{}
             Screen::Group(group)=>{
                 selection=self.tool_index;
                 let rows=((self.bottom(canvas)-50).max(44) as usize/44).max(1);page=selection/rows;
@@ -619,8 +586,13 @@ impl App {
                 for (row,tool) in group.tools().iter().skip(page*rows).take(rows).enumerate() {
                     let index=page*rows+row;if !full&&index!=selection&&index!=self.last_selection{continue;}
                     let y=50+row as i16*44;let selected=index==selection;let bg=if selected{theme::SURFACE_ALT}else{theme::SURFACE};
+                    let accent=Self::group_accent(group);
                     canvas.fill_rect(Rect::new(8,y,canvas.width().saturating_sub(20),38),bg);
-                    if selected {canvas.fill_rect(Rect::new(8,y,2,38),Self::group_accent(group));}
+                    if selected {
+                        // Lupala-style: accent underline + chevron instead of a side bar.
+                        canvas.fill_rect(Rect::new(8,y+36,canvas.width().saturating_sub(20),2),accent);
+                        Self::text(canvas,(canvas.width().saturating_sub(44)) as i16,y+16,24,">>",accent,bg,1);
+                    }
                     // A dot carries availability without adding a text row.
                     let dot=match self.registry.state(group.device()) {Some(DeviceState::Ready)=>theme::SUCCESS,Some(_)=>theme::DANGER,None=>theme::TEXT_DIM};
                     canvas.fill_rect(Rect::new(canvas.width().saturating_sub(16) as i16,y+18,3,3),dot);
@@ -659,6 +631,26 @@ impl App {
                     top+=44;
                 }
                 if tool.is_pausable() {draw_bar(canvas,Rect::new(10,top,canvas.width().saturating_sub(24),5),u16::from(live.usb_percent)*10,theme::ACCENT);top+=14;}
+                // Scanner radar: sweeping beam + expanding ring while the air is
+                // still being searched; the AP list takes over once results land.
+                if tool==Tool::WifiScan&&matches!(self.screen,Screen::Running(_))&&live.aps.is_empty()&&self.bottom(canvas)>top+120 {
+                    let width=canvas.width().saturating_sub(40);
+                    let r=(width/2) as i16;let cx=(canvas.width()/2) as i16;let cy=top+8+r;
+                    for ring in [1i16,2,3] {
+                        Self::draw_arc(canvas,cx,cy,r*ring/3,0,360,theme::SURFACE_ALT);
+                    }
+                    let sweep=((u16::from(live.tick)*45)%360) as i16;
+                    for i in 0..12i16 {
+                        let deg=sweep-i*3;
+                        let dim=i>=6i16;
+                        Self::draw_line(canvas,cx,cy,
+                            cx+(Self::icos(deg as i32)*r as i32/256) as i16,
+                            cy+(Self::isin(deg as i32)*r as i32/256) as i16,
+                            if dim {theme::SURFACE_ALT}else{theme::ACCENT});
+                    }
+                    Self::plot(canvas,cx-1,cy-1,3,3,theme::ACCENT);
+                    top+=r*2+16;
+                }
                 if tool==Tool::RfSpectrum&&!live.rf_envelope.is_empty()&&self.bottom(canvas)>top+46 {
                     let width=canvas.width().saturating_sub(24);let count=live.rf_envelope.len().min(usize::from(width)).max(1);
                     let baseline=top+44;
@@ -740,6 +732,161 @@ impl App {
             canvas.fill_rect(Rect::new(canvas.width().saturating_sub(5) as i16,y,2,thumb),theme::ACCENT);
         }
     }
+    // ---- category icon primitives: everything is drawn from filled rects ----
+    fn plot(canvas:&mut impl Canvas,x:i16,y:i16,w:u16,h:u16,color:Rgb565) {
+        canvas.fill_rect(Rect::new(x,y,w,h),color);
+    }
+    // Sine at 5-degree resolution, x256; `icos(deg)` is the cosine twin.
+    fn isin(deg:i32)->i32 {
+        let d=deg.rem_euclid(360);
+        let (d,sign)=if d<180 {(d,1)}else{(d-180,-1)};
+        // sin is symmetric around 90 degrees.
+        let d=if d>90 {180-d}else{d};
+        let idx=(d/5) as usize;
+        let a=SIN5[idx] as i32;
+        let b=if idx<18 {SIN5[idx+1] as i32}else{a};
+        sign*(a+(b-a)*(d%5)/5)
+    }
+    fn icos(deg:i32)->i32 {Self::isin(deg+90)}
+    fn draw_arc(canvas:&mut impl Canvas,cx:i16,cy:i16,r:i16,from_deg:i16,to_deg:i16,color:Rgb565) {
+        let mut deg=from_deg;
+        while deg<=to_deg {
+            let x=cx+(Self::icos(deg as i32)*r as i32/256) as i16;
+            let y=cy+(Self::isin(deg as i32)*r as i32/256) as i16;
+            Self::plot(canvas,x,y,2,2,color);
+            deg+=5;
+        }
+    }
+    fn draw_line(canvas:&mut impl Canvas,x0:i16,y0:i16,x1:i16,y1:i16,color:Rgb565) {
+        let steps=(x1-x0).abs().max((y1-y0).abs()).max(1) as i32;
+        for i in 0..=steps {
+            let t=i;
+            let x=x0+((x1-x0) as i32*t/steps) as i16;
+            let y=y0+((y1-y0) as i32*t/steps) as i16;
+            Self::plot(canvas,x,y,2,2,color);
+        }
+    }
+    /// Animated category emblem, centered on (cx,cy). `phase` advances 10 ms.
+    fn draw_category_icon(canvas:&mut impl Canvas,index:usize,cx:i16,cy:i16,r:i16,accent:Rgb565,phase:u64) {
+        if index>=7 {
+            // Diagnostics: heartbeat trace.
+            let rr=r*8/10;
+            for (x0,y0,x1,y1) in [(-rr,0,-rr/2,0),(-rr/2,0,-rr/4,-rr*6/10),(0,rr*6/10,rr/4,-rr*4/10),(rr/4,-rr*4/10,rr,0)] {
+                Self::draw_line(canvas,cx+x0,cy+y0,cx+x1,cy+y1,accent);
+            }
+            return;
+        }
+        let group=GROUPS[index];
+        let p=(phase%40) as i16; // 0..=39, loops every ~4 s
+        match group {
+            Group::Wifi=>{
+                // Pulsing arcs over a fixed dot.
+                let pulse=p%20;
+                Self::plot(canvas,cx-2,cy-2,4,4,accent);
+                for (i,base) in [10i16,18,26].iter().enumerate() {
+                    let rr=base+pulse*i as i16/7;
+                    if rr>base+10 {continue;}
+                    Self::draw_arc(canvas,cx,cy+8,rr,205,335,accent);
+                }
+            }
+            Group::Packet=>{
+                // Sliding capture layers.
+                for (i,y) in [-8i16,0,8].iter().enumerate() {
+                    let slide=((p as i32+i as i32*13)%20-10) as i16;
+                    Self::plot(canvas,cx-r+slide.abs(),cy+y-1,(r*2-4) as u16,4,accent);
+                }
+            }
+            Group::Ble=>{
+                // Bluetooth rune with a breathing scale.
+                let rr=r+p%3-1;
+                Self::draw_line(canvas,cx,cy-rr,cx,cy+rr,accent);
+                Self::draw_line(canvas,cx,cy-rr,cx+rr*6/10,cy-rr*3/10,accent);
+                Self::draw_line(canvas,cx+rr*6/10,cy-rr*3/10,cx,cy,accent);
+                Self::draw_line(canvas,cx,cy,cx+rr*6/10,cy+rr*3/10,accent);
+                Self::draw_line(canvas,cx+rr*6/10,cy+rr*3/10,cx,cy+rr,accent);
+            }
+            Group::UsbHid=>{
+                // Trident: shaft, two prongs, arrow tip, base.
+                Self::draw_line(canvas,cx,cy-r/2,cx,cy+r,accent);
+                Self::draw_line(canvas,cx,cy-r/2,cx-r*6/10,cy-r,accent);
+                Self::draw_line(canvas,cx,cy-r/2,cx+r*6/10,cy-r,accent);
+                Self::plot(canvas,cx-1,cy-r-3,3,3,accent);
+                Self::plot(canvas,cx-r/2,cy+r-3,6,5,accent);
+            }
+            Group::Rf=>{
+                // Antenna mast with an expanding sweep ring.
+                Self::draw_line(canvas,cx,cy-r/2,cx,cy+r/2,accent);
+                Self::draw_line(canvas,cx-8,cy+r/2,cx+8,cy+r/2,accent);
+                let ring=6+(p%20);
+                Self::draw_arc(canvas,cx,cy-r/2,ring,0,360,accent);
+                Self::plot(canvas,cx-1,cy-r/2-1,3,3,accent);
+            }
+            Group::Gps=>{
+                // Rotating crosshair with an orbiting satellite.
+                Self::draw_arc(canvas,cx,cy,r*7/10,0,360,accent);
+                Self::plot(canvas,cx-1,cy-1,3,3,accent);
+                for (deg,(dx,dy)) in [(0i16,(0i16,-(r+3))),(90,(r+3,0)),(180,(0,r+3)),(270,(-(r+3),0))] {
+                    Self::draw_line(canvas,cx+dx/3,cy+dy/3,cx+dx,cy+dy,accent);
+                    let _=deg;
+                }
+                let orb=p*9;
+                let ox=cx+(Self::icos(orb as i32)*r as i32/256) as i16;
+                let oy=cy+(Self::isin(orb as i32)*r as i32/256) as i16;
+                Self::plot(canvas,ox,oy,3,3,theme::SUCCESS);
+            }
+            Group::Network=>{
+                // Three linked nodes; links blink in sequence.
+                let (ax,ay)=(cx-r*7/10,cy-r*5/10);let (bx2,by2)=(cx+r*7/10,cy-r*5/10);let (cx2,cy2)=(cx,cy+r*6/10);
+                let blink=p%3;
+                if blink!=0 {Self::draw_line(canvas,ax,ay,bx2,by2,accent);}
+                if blink!=1 {Self::draw_line(canvas,bx2,by2,cx2,cy2,accent);}
+                if blink!=2 {Self::draw_line(canvas,cx2,cy2,ax,ay,accent);}
+                for (x,y) in [(ax,ay),(bx2,by2),(cx2,cy2)] {
+                    Self::plot(canvas,x-2,y-2,6,6,accent);
+                }
+            }
+        }
+    }
+    fn category_blurb(index:usize)->(&'static str,&'static str) {
+        if index>=7 {return ("SYSTEM HEALTH","BATTERY - BOARDS - LOGS");}
+        match GROUPS[index] {
+            Group::Wifi=>("WIRELESS OPERATIONS","SCAN - CAPTURE - PORTAL"),
+            Group::Packet=>("PACKET ANALYSIS","CAPTURE - INSPECT - STREAM"),
+            Group::Ble=>("BLUETOOTH LE","SCAN - SPAM - GATT - HID"),
+            Group::UsbHid=>("USB SCRIPTING","DUCKYSCRIPT - PAYLOADS"),
+            Group::Rf=>("2.4 GHZ RADIO","SPECTRUM - CAPTURE"),
+            Group::Gps=>("POSITIONING","TRACK - WARDRIVE"),
+            Group::Network=>("LOCAL NETWORK","DISCOVER - PROBE - PORTS"),
+        }
+    }
+    /// Lupala-style category intro: accent frame, animated emblem, taglines.
+    fn render_intro(&self,canvas:&mut impl Canvas,index:usize) {
+        let width=canvas.width();let height=canvas.height();
+        let accent=if index<7 {Self::group_accent(GROUPS[index])}else{theme::TEXT_DIM};
+        canvas.fill_rect(Rect::new(0,0,width,height),theme::BACKGROUND);
+        // Full accent frame, 2 px.
+        canvas.fill_rect(Rect::new(0,0,width,2),accent);
+        canvas.fill_rect(Rect::new(0,(height.saturating_sub(2)) as i16,width,2),accent);
+        canvas.fill_rect(Rect::new(0,0,2,height),accent);
+        canvas.fill_rect(Rect::new((width.saturating_sub(2)) as i16,0,2,height),accent);
+        let big=width>=200;
+        let (headline,feature)=Self::category_blurb(index);
+        // Title bar + module name.
+        let title=if index<7 {GROUPS[index].title()}else{"Diagnostics"};
+        Self::text(canvas,10,10,width.saturating_sub(20),title,theme::TEXT,theme::BACKGROUND,if big {2}else{1});
+        Self::text(canvas,10,if big {30}else{22},width.saturating_sub(20),headline,theme::ACCENT,theme::BACKGROUND,1);
+        // Animated emblem, centered.
+        let r=if big {30}else{20};
+        Self::draw_category_icon(canvas,index,(width/2) as i16,(if big {118}else{74}) as i16,r,accent,12);
+        // Blurb + footer hints.
+        let desc_y=(if big {168}else{104}) as i16;
+        // Center with a left clamp: narrow panels ellipsize instead of underflowing.
+        let center=|len:usize|((width as i16)/2-(len as i16)*3).max(2);
+        Self::text(canvas,center(headline.len()),desc_y,width,headline,theme::TEXT_DIM,theme::BACKGROUND,1);
+        Self::text(canvas,center(feature.len()),desc_y+14,width,feature,theme::ACCENT,theme::BACKGROUND,1);
+        let hint="SEL  TOOLS    BACK  MENU";
+        Self::text(canvas,center(hint.len()),height.saturating_sub(22) as i16,width,hint,theme::TEXT_DIM,theme::BACKGROUND,1);
+    }
     /// Boot splash: logo, title, reveal-in boot checklist and a blinking hint.
     fn render_splash(&self,canvas:&mut impl Canvas) {
         canvas.fill_rect(Rect::new(0,0,canvas.width(),canvas.height()),theme::BACKGROUND);
@@ -782,23 +929,13 @@ impl App {
     fn render_footer(&self,canvas:&mut impl Canvas) {
         let y=Self::footer_y(canvas);canvas.fill_rect(Rect::new(0,y,canvas.width(),20),theme::SURFACE);
         let hint=match self.screen {
-            Screen::Home=>"SEL  OPEN",Screen::Group(_)=>"SEL  START",
+            Screen::Group(_)=>"SEL  START",
             Screen::Setup(_)=>"SEL  CHANGE",Screen::Running(tool) if tool.is_pausable()=>"SEL  PAUSE",
             Screen::Running(Tool::PktFiles)=>"SEL  PREVIEW",
             Screen::Running(_)=>"BACK  STOP",Screen::Results(_)=>"SEL  SETTINGS",
             Screen::Edit(_,_)=>"BACK  SAVE",_=>"BACK  RETURN",
         };
         Self::text(canvas,10,y+6,canvas.width().saturating_sub(60),hint,theme::TEXT_DIM,theme::SURFACE,1);
-        // Battery pill with level fill and a terminal nub; red when low.
-        if let Some(percent)=self.live.battery {
-            let bx=canvas.width().saturating_sub(40) as i16;let by=y+5;
-            let level=if percent<=10 {theme::DANGER}else if percent<=35 {theme::WARNING}else{theme::SUCCESS};
-            canvas.fill_rect(Rect::new(bx,by,20,10),theme::TEXT_DIM);
-            canvas.fill_rect(Rect::new(bx+1,by+1,18,8),theme::SURFACE);
-            canvas.fill_rect(Rect::new(bx+20,by+2,2,6),theme::TEXT_DIM);
-            let fill=(u16::from(percent)*18/100).min(18);
-            if fill>0 {canvas.fill_rect(Rect::new(bx+1,by+1,fill,8),level);}
-        }
         // Results screens already show the outcome as content; the pop-up band
         // would repeat it.
         if let Some(message)=&self.live.message {

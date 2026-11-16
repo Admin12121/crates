@@ -93,6 +93,9 @@ fn main()->io::Result<()> {
     // Splash: what the device shows for ~2.6 s at power-on.
     let mut splash=App::new(registry());splash.enter_splash(0);splash.splash_tick(1900);splash.set_live(live());
     render(&mut splash,240,320,&output.join("splash-240x320.png"))?;
+    // Category intro: animated emblem frame, Lupala-style.
+    let mut intro=App::new(registry());intro.handle(Button::Select);intro.set_anim_clock(1200);intro.set_live(live());
+    render(&mut intro,240,320,&output.join("category-intro-240x320.png"))?;
     // Home tiles carry live counters, so seed them like the running device does.
     let mut home=App::new(registry());home.set_live(live());render(&mut home,240,320,&output.join("home-240x320.png"))?;
     let mut small=App::new(registry());small.set_live(live());render(&mut small,128,160,&output.join("home-128x160.png"))?;

@@ -570,6 +570,7 @@ async fn main(spawner: Spawner) -> ! {
         } else if !message_seen.0.is_empty() {
             message_seen=(String::new(),0);
         }
+        app.set_anim_clock(now_ms);
         app.splash_tick(now_ms);
         rf.step(now_ms);
         if payload::sync_from_storage(){refresh_payloads(&mut app);}

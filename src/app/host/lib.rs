@@ -63,7 +63,7 @@ mod tests {
     fn open_legacy(group:usize)->App {
         let mut app=App::new(registry());
         for _ in 0..group {app.handle(Button::Down);}
-        app.handle(Button::Select); app.handle(Button::Select); app.handle(Button::Select);
+        app.handle(Button::Select); app.handle(Button::Select); app.handle(Button::Select); app.handle(Button::Select);
         app
     }
     #[test]
@@ -110,6 +110,7 @@ mod tests {
         let mut app=App::new(registry());
         assert_eq!(app.handle(Button::Select),Action::None);
         assert_eq!(app.handle(Button::Select),Action::None,"opening setup must not start a driver");
+        app.handle(Button::Select);
         let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);
         assert!(canvas.text.contains("SETTINGS"));
         assert_eq!(app.handle(Button::Select),Action::Start(app::Tool::WifiScan));
@@ -118,7 +119,7 @@ mod tests {
         app.set_live(Live::default());
         let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);
         assert!(canvas.text.contains("RESULTS"));assert!(canvas.text.contains("42 PACKETS"),"stopping preserves the result even when driver counters reset");
-        app.handle(Button::Home);app.handle(Button::Select);app.handle(Button::Select);app.handle(Button::Up);app.handle(Button::Select);
+        app.handle(Button::Home);app.handle(Button::Select);app.handle(Button::Select);app.handle(Button::Select);app.handle(Button::Up);app.handle(Button::Select);
         let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);assert!(canvas.text.contains("42 PACKETS"));
     }
     #[test]
@@ -135,7 +136,7 @@ mod tests {
     #[test]
     fn usb_payload_selection_layout_pause_resume_and_stop() {
         let mut app=App::new(registry());app.set_payloads(&["HID test","Text editor","Presenter"]);
-        for _ in 0..3 {app.handle(Button::Down);}app.handle(Button::Select);app.handle(Button::Select);
+        for _ in 0..3 {app.handle(Button::Down);}app.handle(Button::Select);app.handle(Button::Select);app.handle(Button::Select);
         app.handle(Button::Down);app.handle(Button::Select);assert_eq!(app.settings().payload,1);
         app.handle(Button::Down);app.handle(Button::Select);assert_eq!(app.settings().layout,app::KeyboardLayout::Uk);
         app.handle(Button::Up);app.handle(Button::Up);
@@ -147,17 +148,17 @@ mod tests {
     #[test]
     fn unavailable_tools_explain_reason_and_never_dispatch_fake_work() {
         let mut app=App::new(cyberdeck_core::PeripheralRegistry::new());
-        app.handle(Button::Select);assert_eq!(app.handle(Button::Select),Action::None);
+        app.handle(Button::Select);app.handle(Button::Select);assert_eq!(app.handle(Button::Select),Action::None);
         let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);
         assert!(canvas.text.contains("Wi-Fi radio"));
         let mut app=App::new(registry());app.set_tool_unavailable(app::Tool::WifiScan,"Disabled in simulator");
-        app.handle(Button::Select);assert_eq!(app.handle(Button::Select),Action::None);
+        app.handle(Button::Select);app.handle(Button::Select);assert_eq!(app.handle(Button::Select),Action::None);
         let mut canvas=TestCanvas::new(128,160);app.render(&mut canvas);assert!(canvas.text.contains("Disabled"));
     }
     #[test]
     fn ssid_and_password_editor_supply_real_credentials() {
         let mut app=App::new(registry());app.set_tool_available(app::Tool::NetInfo);
-        for _ in 0..6 {app.handle(Button::Down);}app.handle(Button::Select);app.handle(Button::Select);
+        for _ in 0..6 {app.handle(Button::Down);}app.handle(Button::Select);app.handle(Button::Select);app.handle(Button::Select);
         app.handle(Button::Down);app.handle(Button::Down);app.handle(Button::Select);
         app.handle(Button::Up);app.handle(Button::Select);app.handle(Button::Back);
         app.handle(Button::Down);app.handle(Button::Select);app.handle(Button::Select);app.handle(Button::Back);
@@ -166,7 +167,7 @@ mod tests {
 
     #[test]
     fn long_wrapped_content_is_reachable_by_scrolling() {
-        let mut app=App::new(registry());app.handle(Button::Select);app.handle(Button::Down);app.handle(Button::Select);app.handle(Button::Select);
+        let mut app=App::new(registry());app.handle(Button::Select);app.handle(Button::Select);app.handle(Button::Down);app.handle(Button::Select);app.handle(Button::Select);
         let mut live=Live::default();live.packet_lines=vec![format!("Header {} END_MARKER","X".repeat(240))];app.set_live(live);
         let mut canvas=TestCanvas::new(128,160);app.render(&mut canvas);
         for _ in 0..100 {app.handle(Button::Down);}
@@ -180,7 +181,7 @@ mod tests {
                 let mut app=App::new(registry());
                 for tool in [app::Tool::GpsStatus,app::Tool::NetInfo]{app.set_tool_available(tool);}
                 for _ in 0..group{app.handle(Button::Down);}
-                for _ in 0..3 {
+                for _ in 0..4 {
                     app.handle(Button::Select);
                     let mut canvas=TestCanvas::new(width,height);app.render(&mut canvas);
                     for (x,y,scale) in canvas.glyphs {
@@ -206,7 +207,8 @@ mod tests {
     fn open_setup(group: usize, tool: usize) -> App {
         let mut app = App::new(registry());
         for _ in 0..group { app.handle(Button::Down); }
-        app.handle(Button::Select);
+        app.handle(Button::Select); // category intro
+        app.handle(Button::Select); // intro -> tool list
         for _ in 0..tool { app.handle(Button::Down); }
         app.handle(Button::Select);
         app
@@ -242,6 +244,7 @@ mod tests {
         for _ in 0..5 { app.handle(Button::Select); }
         assert_eq!(app.settings().target, 6);
         app.handle(Button::Home);
+        app.handle(Button::Select);
         app.handle(Button::Select);
         app.handle(Button::Select);
         let mut live = Live::default();
@@ -299,6 +302,60 @@ mod tests {
         let lines=cyberdeck_core::ui::wrap("short ABCDEFGHIJKLMNOPQRSTUVWXYZ tail",10);
         assert!(lines.iter().all(|line|line.chars().count()<=10),"every wrapped line must fit: {lines:?}");
         assert_eq!(lines.join("").replace(' ',""),"shortABCDEFGHIJKLMNOPQRSTUVWXYZtail");
+    }
+
+    #[test]
+    fn device_loop_simulation_navigates_and_never_sticks() {
+        // Replicates the firmware main loop: 20 ms steps, anim clock, splash
+        // ticks, render gates and real button presses at simulated times.
+        let mut app=App::new(registry());
+        app.enter_splash(0);
+        let mut now=0u64;
+        let mut renders=0u32;
+        while now<4000 {
+            now+=20;
+            app.splash_tick(now);
+            app.set_anim_clock(now);
+            // render gate, mirroring main.rs cadence
+            let gate=if app.splash_active() {80}else{250};
+            if now%gate==0 && app.take_dirty() {
+                let mut canvas=TestCanvas::new(240,320);
+                app.render(&mut canvas);
+                renders+=1;
+            }
+            if now==1000 {app.handle(Button::Select);} // user skips the splash
+        }
+        assert!(renders>10,"splash must repaint while revealing");
+        assert!(!app.splash_active(),"splash dismissed by the button");
+        // SEL on Home opens the category intro; it must draw once, never loop.
+        app.handle(Button::Select);
+        assert!(app.intro_active());
+        app.set_anim_clock(now);app.take_dirty();
+        let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);
+        // 5.2 s of silence: the intro self-advances to the tool list.
+        for _ in 0..260 {now+=20;app.set_anim_clock(now);}
+        assert!(!app.intro_active(),"intro self-advances after 5 s");
+        // And buttons still work on the tool list: Setup -> Start -> Back/Stop.
+        assert_eq!(app.handle(Button::Select),Action::None);
+        assert_eq!(app.handle(Button::Select),Action::Start(app::Tool::WifiScan));
+        assert_eq!(app.handle(Button::Back),Action::Stop);
+    }
+
+    #[test]
+    fn device_loop_simulation_with_rapid_buttons_never_panics() {
+        // Hammer every button every tick across splash/home/intro/list/setup
+        // and render between presses: the state machine must stay consistent.
+        let mut app=App::new(registry());
+        app.enter_splash(0);
+        let buttons=[Button::Up,Button::Down,Button::Select,Button::Back,Button::Home];
+        let mut now=0u64;
+        for step in 0..600u64 {
+            now+=20;
+            app.splash_tick(now);
+            app.set_anim_clock(now);
+            app.handle(buttons[(step as usize)%5]);
+            if now%80==0 && app.take_dirty() {let mut c=TestCanvas::new(240,320);app.render(&mut c);}
+        }
     }
 
 }
