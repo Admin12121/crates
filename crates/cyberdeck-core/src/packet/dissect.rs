@@ -367,7 +367,8 @@ mod tests {
     #[test]
     fn encrypted_and_runt_frames_stay_bounded() {
         let mut encrypted = data_frame(0x0800, &ipv4_tcp());
-        encrypted[0] |= 0x40;
+        // FC is little-endian: the protected bit is bit 14, i.e. the high bit of byte 1.
+        encrypted[1] |= 0x40;
         let text = joined(&lines(&encrypted));
         assert!(text.contains("encrypted payload"), "{text}");
         assert!(!text.contains("tcp"), "{text}");

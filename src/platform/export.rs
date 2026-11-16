@@ -39,9 +39,9 @@ pub fn save_wifi_hashes(hashes: &str) -> bool {
     sd::enqueue(&name, hashes.as_bytes().to_vec(), false)
 }
 
-/// G03: observed BLE devices, radio class and RSSI.
-pub fn save_ble_history(devices: &[BleDevice], frames: u32) -> bool {
-    if devices.is_empty() {
+/// G03: observed BLE devices, radio class and RSSI, plus any GATT read.
+pub fn save_ble_history(devices: &[BleDevice], frames: u32, gatt: &[String]) -> bool {
+    if devices.is_empty() && gatt.is_empty() {
         return false;
     }
     let mut text = alloc::format!("frames {frames}\nname,address,rssi,kind,detail\n");
@@ -54,6 +54,14 @@ pub fn save_ble_history(devices: &[BleDevice], frames: u32) -> bool {
             device.kind,
             csv_field(&device.detail)
         ));
+    }
+    if !gatt.is_empty() {
+        text.push_str("# gatt\n");
+        for line in gatt.iter().take(64) {
+            text.push_str("# ");
+            text.push_str(&csv_field(line));
+            text.push('\n');
+        }
     }
     let name = sd::next_name("BLE", "CSV");
     sd::enqueue(&name, text.into_bytes(), false)

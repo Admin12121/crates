@@ -171,7 +171,7 @@ fn export_findings(tool:Option<Tool>,rf:&RfRuntime<'_>){
     if matches!(tool,Some(Tool::WifiScan|Tool::WifiCapture|Tool::WifiHandshake|Tool::WifiWps|Tool::WifiClients)){
         let _=export::save_wifi_hashes(&wifi::passive_hashes());
     }
-    if matches!(tool,Some(Tool::BleScan|Tool::BleSpam|Tool::BleGatt)){let(_,devices,frames)=ble::snapshot();let _=export::save_ble_history(&devices,frames);}
+    if matches!(tool,Some(Tool::BleScan|Tool::BleSpam|Tool::BleGatt)){let(_,devices,frames)=ble::snapshot();let _=export::save_ble_history(&devices,frames,&ble::gatt_snapshot());}
     if tool==Some(Tool::RfCapture){let _=export::save_rf_capture(&rf.log);}
 }
 
@@ -523,10 +523,12 @@ async fn main(spawner: Spawner) -> ! {
         if now_ms.saturating_sub(last_render_ms)>=250 {
             let(wifi_status,aps,wifi_frames,wifi_dropped)=wifi::snapshot();
             let(ble_status,ble_devices,ble_frames)=ble::snapshot();
-            let(usb_status,usb_percent,usb_keystrokes,usb_unsupported)=usb::snapshot();
+            // BLE HID reports through the same progress fields as USB HID.
+            let(usb_status,usb_percent,usb_keystrokes,usb_unsupported)=if active_tool==Some(Tool::BleHid){ble::hid_snapshot()}else{usb::snapshot()};
             let(net_status,mut net_lines,net_busy)=network::snapshot();
             net_lines.insert(0,net_status.clone());
             let passive=wifi::passive_snapshot();
+            let(portal_clients,portal_requests)=wifi::portal_snapshot();
             let mut packet_lines=Vec::new();
             match active_tool {
                 Some(Tool::WifiClients)=>{
@@ -541,6 +543,7 @@ async fn main(spawner: Spawner) -> ! {
                 _=>{for frame in passive.frames.iter().take(4){packet_lines.push(frame.summary.clone());packet_lines.push(frame.metadata.clone());packet_lines.push(frame.hex.clone());}},
             }
             if active_tool==Some(Tool::PktAnalyse){packet_lines=wifi::dissect_latest();}
+            if active_tool==Some(Tool::WifiKarma){packet_lines=passive.probes.iter().map(|row|row.line()).collect();}
             let(storage_status,files)=sd::library_snapshot();
             let capture_files=files.iter().enumerate().map(|(i,file)|alloc::format!("{} {} {} B",i+1,file.name,file.bytes)).collect();
             if active_tool==Some(Tool::PktFiles){packet_lines=alloc::vec![storage_status];if !file_last_name.is_empty(){packet_lines.push(file_last_name.clone());}packet_lines.extend(sd::preview().lines().take(24).map(String::from));}
@@ -549,6 +552,8 @@ async fn main(spawner: Spawner) -> ! {
             let preview=usb::preview(app.settings().payload).map(|text|text.lines().take(20).map(String::from).collect()).unwrap_or_default();
             let live=Live{wifi_status:wifi_status.clone(),wifi_busy:wifi::busy(),aps,wifi_frames,wifi_dropped,
                 eapol:passive.eapol,handshakes:passive.handshakes,pmkids:passive.pmkids,
+                portal_clients,portal_requests,
+                probe_ssids:passive.probe_ssids,probe_rows:passive.probes.len() as u32,
                 rf_envelope:rf.envelope(),rf_peak:rf.spectrum.peak_channel().unwrap_or(0),rf_packets:rf.packets,rf_dropped:rf.log.dropped(),
                 ble_status:ble_status.clone(),ble_devices,ble_frames,usb_status:usb_status.clone(),usb_percent,usb_keystrokes,usb_unsupported,
                 buttons:buttons.levels(),probe_lines,message:app.message(),usb_paused:app.usb_paused(),

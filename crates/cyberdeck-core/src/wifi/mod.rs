@@ -16,6 +16,7 @@
 pub mod ap;
 pub mod attack;
 pub mod crypto;
+pub mod dhcp;
 pub mod eapol;
 pub mod frame;
 pub mod portal;

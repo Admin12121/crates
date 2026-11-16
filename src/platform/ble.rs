@@ -60,7 +60,8 @@ pub enum BleCommand {
     ScanConfigured { active:bool, interval_ms:u16, window_ms:u16 },
     Advertise(SpamCampaign),
     Inspect { index:u8 },
-    HidListen,
+    /// Advertise as a HID peripheral and deliver this payload once paired.
+    HidListen { payload:u8, layout:Layout },
     RunHidPayload { index:u8, layout:Layout },
     HidPause,
     HidResume,
@@ -169,7 +170,7 @@ async fn actor(stack:&BleStack<'_>)->! {
                 BleCommand::ScanConfigured{active,interval_ms,window_ms}=>scan(stack,token,active,interval_ms,window_ms).await,
                 BleCommand::Advertise(campaign)=>advertise(stack,token,campaign).await,
                 BleCommand::Inspect{index}=>inspect(stack,token,index).await,
-                BleCommand::HidListen=>hid_listen(stack,token).await,
+                BleCommand::HidListen{payload,layout}=>hid_listen(stack,token,payload,layout).await,
                 _=>Ok(()),
             };
             // Cleanup is awaited before busy becomes false, including a rapid
@@ -294,7 +295,7 @@ async fn hid_output(reports:&HidReports,conn:&GattConnection<'_,'_,DefaultPacket
         }
     }.map_err(|_|"BLE HID report failed")
 }
-async fn hid_listen(stack:&BleStack<'_>,token:u32)->Result<(),&'static str> {
+async fn hid_listen(stack:&BleStack<'_>,token:u32,payload:u8,layout:Layout)->Result<(),&'static str> {
     let mut keyboard=[0;8];let mut consumer=[0;2];let mut mouse=[0;4];
     let(server,reports)=hid_server(&mut keyboard,&mut consumer,&mut mouse);
     let mut peripheral=stack.peripheral();
@@ -308,7 +309,9 @@ async fn hid_listen(stack:&BleStack<'_>,token:u32)->Result<(),&'static str> {
     let _=conn.raw().request_security();
     HID_CONNECTED.store(true,Ordering::Release);
     HID_PAUSED.store(false,Ordering::Release);
-    critical_section::with(|cs|HID_PAYLOAD.borrow_ref_mut(cs).take());
+    // Queue the chosen script now; it runs as soon as the host has paired and
+    // subscribed, so pairing on the phone is the only user step.
+    critical_section::with(|cs|*HID_PAYLOAD.borrow_ref_mut(cs)=Some((payload,layout)));
     set_status("HID connected; pair, then select Run");
     let events=async {
         loop {match conn.next().await {

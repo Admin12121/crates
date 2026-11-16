@@ -87,8 +87,40 @@ fn main()->io::Result<()> {
     let mut handshake_live=live();handshake_live.eapol=6;handshake_live.handshakes=1;handshake_live.pmkids=2;
     handshake.set_live(handshake_live);
     render(&mut handshake,240,320,&output.join("wifi-handshake-240x320.png"))?;
+    // Evil Twin: portal counters as the device shows them.
+    let mut twin=open(0,5,true);
+    let mut twin_live=live();twin_live.portal_clients=2;twin_live.portal_requests=7;
+    twin.set_live(twin_live);
+    render(&mut twin,240,320,&output.join("wifi-evil-twin-240x320.png"))?;
+    // Karma: probe requests as the device lists them.
+    let mut karma=open(0,6,true);
+    let mut karma_live=live();karma_live.probe_ssids=3;karma_live.probe_rows=4;
+    karma_live.packet_lines=vec![
+        String::from("WORKSHOP  02:AA:BB:CC:DD:01  -48DBM"),
+        String::from("GUEST  02:AA:BB:CC:DD:02  -52DBM"),
+        String::from("SENSOR-LAB  02:AA:BB:CC:DD:03  -66DBM"),
+        String::from("WILDCARD  02:AA:BB:CC:DD:04  -71DBM"),
+    ];
+    karma.set_live(karma_live);
+    render(&mut karma,240,320,&output.join("wifi-karma-240x320.png"))?;
+    // Frame inspector: the dissector output as the device renders it.
+    let mut inspector=open(1,1,true);
+    let mut inspector_live=live();
+    inspector_live.packet_lines=vec![
+        String::from("802.11 data type 2 sub 0"),
+        String::from("  24:6F:28:10:06:01 > 02:AA:BB:CC:DD:EE"),
+        String::from("  bssid 24:6F:28:10:06:01  seq 4121"),
+        String::from("  ipv4"),
+        String::from("    192.168.1.42 > 93.184.216.34"),
+        String::from("    ttl 64  52 B  proto 6"),
+        String::from("    tcp 51422 > 443  syn"),
+    ];
+    inspector.set_live(inspector_live);
+    render(&mut inspector,240,320,&output.join("packet-inspector-240x320.png"))?;
     wifi.handle(Button::Back);render(&mut wifi,240,320,&output.join("wifi-results-240x320.png"))?;
     let mut ble=open(2,0,true);ble.set_live(live());render(&mut ble,240,320,&output.join("ble-live-240x320.png"))?;
+    // BLE HID setup: payload + layout, same picker as the USB path.
+    let mut blehid=open(2,3,false);blehid.set_live(live());render(&mut blehid,240,320,&output.join("ble-hid-setup-240x320.png"))?;
     let mut usb=open(3,1,false);usb.set_live(live());render(&mut usb,240,320,&output.join("usb-setup-240x320.png"))?;
     let mut rf=open(4,0,true);rf.set_live(live());render(&mut rf,240,320,&output.join("rf-live-240x320.png"))?;
     let mut gps=open(5,0,true);gps.set_live(live());render(&mut gps,240,320,&output.join("gps-live-240x320.png"))?;

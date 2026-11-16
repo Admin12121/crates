@@ -1,4 +1,5 @@
 //! UI action to platform command mapping; every accepted tool has a real driver path.
+use alloc::string::String;
 use super::{RfRuntime,RfMode};
 use cyberdeck_firmware::{app::{App,Tool,PacketFilter,KeyboardLayout},platform::{wifi::{self,WifiCommand},ble::{self,BleCommand},usb::{self,UsbCommand},sd,gps::{self,GpsCommand},network::{self,NetCommand}}};
 use cyberdeck_core::{hid::Layout,packet::CaptureFilter,rf::nrf24::DataRate};
@@ -17,6 +18,13 @@ pub fn start(tool:Tool,app:&mut App,rf:&mut RfRuntime<'_>,flags:Flags)->Result<(
   Tool::WifiScan=>{if !flags.wifi{return Err("Wi-Fi radio unavailable");}queued(wifi::submit(WifiCommand::Scan))},
   Tool::WifiCapture|Tool::PktCapture=>{if !flags.wifi{return Err("Wi-Fi radio unavailable");}queued(wifi::submit(if s.stream{WifiCommand::Stream{channel:s.channel,filter}}else{WifiCommand::Observe{channel:s.channel,filter,record:true}}))},
   Tool::PktAnalyse|Tool::WifiWps|Tool::WifiClients=>queued(wifi::submit(WifiCommand::Observe{channel:s.channel,filter,record:false})),
+  Tool::WifiKarma=>queued(wifi::submit(WifiCommand::Observe{channel:s.channel,filter,record:false})),
+  Tool::WifiEvilTwin=>{
+   if s.channel==0{return Err("Choose a fixed channel for the portal");}
+   let(ssid,_)=app.network_credentials();
+   let ssid=if ssid.is_empty(){String::from("Free WiFi")}else{ssid};
+   queued(wifi::submit(WifiCommand::Portal{ssid,channel:s.channel,template:cyberdeck_core::wifi::portal::PortalTemplate::NetworkSignIn}))
+  },
   Tool::WifiHandshake=>{let mut filter=filter;filter.eapol_only=true;queued(wifi::submit(WifiCommand::Observe{channel:s.channel,filter,record:true}))},
   Tool::PktStream=>{if !flags.usb{return Err("Connect native USB CDC to a host");}queued(wifi::submit(WifiCommand::Stream{channel:s.channel,filter}))},
   Tool::WifiBeacon|Tool::WifiDeauth=>{if s.channel==0{return Err("Choose a fixed channel for this existing test");}queued(wifi::submit(WifiCommand::Attack{mode:if tool==Tool::WifiBeacon{cyberdeck_core::wifi::attack::AttackMode::BeaconSpam}else{cyberdeck_core::wifi::attack::AttackMode::Deauth},channel:s.channel}))},
@@ -24,7 +32,7 @@ pub fn start(tool:Tool,app:&mut App,rf:&mut RfRuntime<'_>,flags:Flags)->Result<(
   Tool::BleScan=>{if !flags.ble{return Err("BLE radio unavailable");}queued(ble::submit(BleCommand::Scan))},
   Tool::BleSpam=>{let campaign=cyberdeck_core::ble::spam::SpamCampaign::from_index(s.target.saturating_sub(1) as usize).unwrap_or(cyberdeck_core::ble::spam::SpamCampaign::IBeacon);queued(ble::submit(BleCommand::Advertise(campaign)))},
   Tool::BleGatt=>queued(ble::submit(BleCommand::Inspect{index:s.target.saturating_sub(1)})),
-  Tool::BleHid=>queued(ble::submit(BleCommand::RunHidPayload{index:s.payload,layout})),
+  Tool::BleHid=>queued(ble::submit(BleCommand::HidListen{payload:s.payload,layout})),
   Tool::HidIntro|Tool::HidDucky=>{if !flags.usb{return Err("Native USB HID unavailable");}queued(usb::submit(UsbCommand::RunPayload{index:s.payload,layout}))},
   Tool::RfSpectrum|Tool::RfCapture=>{
    if wifi::busy()||ble::busy(){return Err("Stop Wi-Fi and BLE before using nRF");}

@@ -21,6 +21,11 @@ impl LatestFrame {
 }
 #[derive(Clone,Debug)]
 pub struct WpsObservation {pub bssid:MacAddr,pub info:WpsInfo,pub channel:u8,pub rssi:i8}
+/// One station asking for one SSID (the Karma view).
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub struct ProbeRow {pub client:MacAddr,pub ssid:Vec<u8>,pub channel:u8,pub rssi:i8}
+/// Bounded probe-request table.
+pub const MAX_PROBES: usize = 16;
 pub struct PassiveEngine<const A:usize,const S:usize,const H:usize,const R:usize> {
     pub scan:ScanEngine<A,S>,
     pub handshakes:HandshakeStore<H>,
@@ -28,12 +33,13 @@ pub struct PassiveEngine<const A:usize,const S:usize,const H:usize,const R:usize
     pub wps:Vec<WpsObservation>,
     pub histogram:ProtocolHistogram,
     pub latest:LatestFrame,
+    pub probes:Vec<ProbeRow>,
 }
 impl<const A:usize,const S:usize,const H:usize,const R:usize> Default for PassiveEngine<A,S,H,R> {
     fn default()->Self {Self::new()}
 }
 impl<const A:usize,const S:usize,const H:usize,const R:usize> PassiveEngine<A,S,H,R> {
-    pub const fn new()->Self {Self {scan:ScanEngine::new(),handshakes:HandshakeStore::new(),frames:Vec::new(),wps:Vec::new(),latest:LatestFrame::new(),histogram:ProtocolHistogram {beacons:0,probe_requests:0,probe_responses:0,authentication:0,association:0,deauthentication:0,disassociation:0,action:0,eapol:0,data:0,control:0,other:0,malformed:0}}}
+    pub const fn new()->Self {Self {scan:ScanEngine::new(),handshakes:HandshakeStore::new(),frames:Vec::new(),wps:Vec::new(),probes:Vec::new(),latest:LatestFrame::new(),histogram:ProtocolHistogram {beacons:0,probe_requests:0,probe_responses:0,authentication:0,association:0,deauthentication:0,disassociation:0,action:0,eapol:0,data:0,control:0,other:0,malformed:0}}}
     pub fn on_frame(&mut self,data:&[u8],rssi:i8,channel:u8,ts_us:u64,filter:&CaptureFilter,original_len:u32) {
         self.latest.set(data);
         self.scan.on_frame(data,rssi,channel,ts_us/1000);
@@ -46,6 +52,10 @@ impl<const A:usize,const S:usize,const H:usize,const R:usize> PassiveEngine<A,S,
                     if let Some(old)=self.wps.iter_mut().find(|w|w.bssid==row.bssid) {*old=row;}
                     else if A>0 {if self.wps.len()>=A {self.wps.remove(0);}self.wps.push(row);}
                 }
+            }
+            if header.fc.is_management() && header.fc.subtype==frame::subtype::PROBE_REQ {
+                // Karma view: which station is asking for which SSID (empty = wildcard).
+                self.note_probe(header.addr2,frame::find_ssid(header.ies()).unwrap_or(&[]),channel,rssi);
             }
             if header.fc.is_data() && !header.fc.protected && !(header.fc.to_ds && header.fc.from_ds) {
                 if let Some(eapol)=crate::wifi::ap::eapol_payload(header.body) {
@@ -67,6 +77,23 @@ impl<const A:usize,const S:usize,const H:usize,const R:usize> PassiveEngine<A,S,
         if self.frames.len()>=R {self.frames.pop();}
         self.frames.insert(0,row);
     }
+    /// Record a probe request, merging repeats from the same station and SSID.
+    fn note_probe(&mut self,client:MacAddr,ssid:&[u8],channel:u8,rssi:i8) {
+        if let Some(existing)=self.probes.iter_mut().find(|row|row.client==client&&row.ssid==ssid) {
+            existing.channel=channel;existing.rssi=rssi;return;
+        }
+        if self.probes.len()>=MAX_PROBES {self.probes.remove(0);}
+        self.probes.push(ProbeRow {client,ssid:ssid.to_vec(),channel,rssi});
+    }
+    /// Distinct non-empty SSIDs stations have asked for.
+    pub fn probe_ssids(&self)->usize {
+        let mut seen:Vec<&[u8]>=Vec::new();
+        for row in &self.probes {
+            if row.ssid.is_empty() {continue}
+            if !seen.contains(&row.ssid.as_slice()) {seen.push(&row.ssid);}
+        }
+        seen.len()
+    }
     pub fn export_hashes(&self)->String {
         let mut text=String::new();
         for h in self.handshakes.iter() {
@@ -81,6 +108,42 @@ mod tests {
     use super::*;
     use crate::net::MacAddr;
     use crate::wifi::{frame, eapol::*};
+    #[test]
+    fn probe_requests_are_recorded_per_client() {
+        let mut engine:PassiveEngine<4,4,2,2>=PassiveEngine::new();
+        let filter=super::super::CaptureFilter::default();
+        engine.on_frame(&probe_request(MacAddr([0x30;6]),b"Lab"),-50,6,1_000,&filter,40);
+        engine.on_frame(&probe_request(MacAddr([0x31;6]),b"Lab"),-55,6,2_000,&filter,40);
+        // A repeat from the same station updates in place instead of adding a row.
+        engine.on_frame(&probe_request(MacAddr([0x30;6]),b"Lab"),-45,11,3_000,&filter,40);
+        engine.on_frame(&probe_request(MacAddr([0x32;6]),b""),-60,1,4_000,&filter,34);
+        assert_eq!(engine.probes.len(),3);
+        assert_eq!(engine.probes[0].rssi,-45);
+        assert_eq!(engine.probes[0].channel,11);
+        assert_eq!(engine.probe_ssids(),1,"wildcard probes are not a named SSID");
+    }
+    #[test]
+    fn probe_table_is_bounded() {
+        let mut engine:PassiveEngine<4,4,2,2>=PassiveEngine::new();
+        let filter=super::super::CaptureFilter::default();
+        for index in 0..(MAX_PROBES+8) {
+            let mac=MacAddr([0x40,(index&0xFF) as u8,0,0,0,1]);
+            engine.on_frame(&probe_request(mac,b"x"),-40,6,index as u64,&filter,36);
+        }
+        assert_eq!(engine.probes.len(),MAX_PROBES);
+    }
+    fn probe_request(client:MacAddr,ssid:&[u8])->Vec<u8> {
+        let mut frame=alloc::vec![0x40,0x00,0,0];
+        frame.extend_from_slice(&[0xFF;6]);
+        frame.extend_from_slice(client.as_bytes());
+        frame.extend_from_slice(&[0xFF;6]);
+        frame.extend_from_slice(&[0,0]);
+        frame.push(0);
+        frame.push(ssid.len() as u8);
+        frame.extend_from_slice(ssid);
+        frame
+    }
+
     #[test]
     fn beacon_client_handshake_and_inspector_are_connected() {
         let ap=MacAddr([0x10;6]);let client=MacAddr([0x20;6]);

@@ -19,7 +19,7 @@ impl Group {
     }
     pub const fn tools(self)->&'static [Tool] {
         match self {
-            Self::Wifi=>&[Tool::WifiScan,Tool::WifiCapture,Tool::WifiHandshake,Tool::WifiWps,Tool::WifiClients,Tool::WifiBeacon,Tool::WifiDeauth],
+            Self::Wifi=>&[Tool::WifiScan,Tool::WifiCapture,Tool::WifiHandshake,Tool::WifiWps,Tool::WifiClients,Tool::WifiEvilTwin,Tool::WifiKarma,Tool::WifiBeacon,Tool::WifiDeauth],
             Self::Packet=>&[Tool::PktCapture,Tool::PktAnalyse,Tool::PktFiles,Tool::PktStream],
             Self::Ble=>&[Tool::BleScan,Tool::BleSpam,Tool::BleGatt,Tool::BleHid],
             Self::UsbHid=>&[Tool::HidIntro,Tool::HidDucky],
@@ -32,7 +32,7 @@ impl Group {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
-    WifiScan, WifiCapture, WifiBeacon, WifiDeauth, WifiHandshake, WifiWps, WifiClients,
+    WifiScan, WifiCapture, WifiBeacon, WifiDeauth, WifiHandshake, WifiWps, WifiClients, WifiEvilTwin, WifiKarma,
     PktCapture, PktAnalyse, PktFiles, PktStream,
     BleScan, BleSpam, BleGatt, BleHid, HidIntro, HidDucky,
     RfSpectrum, RfCapture, GpsStatus, GpsRecord, GpsWardrive,
@@ -43,6 +43,7 @@ impl Tool {
         match self {
             Self::WifiScan=>"AP scan",Self::WifiCapture=>"Monitor capture",Self::WifiBeacon=>"Beacon test",Self::WifiDeauth=>"Deauth test",
             Self::WifiHandshake=>"Handshake observer",Self::WifiWps=>"WPS information",Self::WifiClients=>"Nearby clients",
+            Self::WifiEvilTwin=>"Evil twin",Self::WifiKarma=>"Karma probes",
             Self::PktCapture=>"Live capture",Self::PktAnalyse=>"Frame inspector",Self::PktFiles=>"Capture files",Self::PktStream=>"USB packet stream",
             Self::BleScan=>"Device scan",Self::BleSpam=>"Advertising",Self::BleGatt=>"GATT services",Self::BleHid=>"BLE keyboard",
             Self::HidIntro=>"HID test",Self::HidDucky=>"Payload library",Self::RfSpectrum=>"Channel monitor",Self::RfCapture=>"Packet capture",
@@ -52,7 +53,7 @@ impl Tool {
     }
     pub const fn group(self)->Group {
         match self {
-            Self::WifiScan|Self::WifiCapture|Self::WifiBeacon|Self::WifiDeauth|Self::WifiHandshake|Self::WifiWps|Self::WifiClients=>Group::Wifi,
+            Self::WifiScan|Self::WifiCapture|Self::WifiBeacon|Self::WifiDeauth|Self::WifiHandshake|Self::WifiWps|Self::WifiClients|Self::WifiEvilTwin|Self::WifiKarma=>Group::Wifi,
             Self::PktCapture|Self::PktAnalyse|Self::PktFiles|Self::PktStream=>Group::Packet,
             Self::BleScan|Self::BleSpam|Self::BleGatt|Self::BleHid=>Group::Ble,
             Self::HidIntro|Self::HidDucky=>Group::UsbHid,Self::RfSpectrum|Self::RfCapture=>Group::Rf,
@@ -61,6 +62,8 @@ impl Tool {
         }
     }
     const fn is_usb(self)->bool {matches!(self,Self::HidIntro|Self::HidDucky)}
+    /// Screens that drive a HID payload, over USB or BLE.
+    const fn is_pausable(self)->bool {self.is_usb()||matches!(self,Self::BleHid)}
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketFilter { All, Management, Data, Eapol }
@@ -90,6 +93,10 @@ pub struct Live {
     pub wifi_status:String,pub wifi_busy:bool,pub aps:Vec<ApRow>,pub wifi_frames:u32,pub wifi_dropped:u32,
     /// Passive EAPOL/PMKID findings, shown as the handshake screen's headline.
     pub eapol:u32,pub handshakes:u32,pub pmkids:u32,
+    /// Captive-portal activity, shown on the Evil Twin screen.
+    pub portal_clients:u32,pub portal_requests:u32,
+    /// Karma view: distinct requested SSIDs and the station count behind them.
+    pub probe_ssids:u32,pub probe_rows:u32,
     pub rf_envelope:Vec<u8>,pub rf_peak:u8,pub rf_packets:u32,pub rf_dropped:u32,
     pub ble_status:String,pub ble_devices:Vec<BleDevice>,pub ble_frames:u32,
     pub usb_status:String,pub usb_percent:u8,pub usb_keystrokes:u32,pub usb_unsupported:u32,pub usb_paused:bool,
@@ -104,6 +111,8 @@ impl Live {
         self.ble_devices.len()==other.ble_devices.len() && self.ble_devices.iter().zip(&other.ble_devices).all(|(a,b)|a.address==b.address&&a.name==b.name&&a.rssi==b.rssi&&a.kind==b.kind&&a.detail==b.detail) &&
         self.wifi_frames==other.wifi_frames&&self.wifi_dropped==other.wifi_dropped&&
         self.eapol==other.eapol&&self.handshakes==other.handshakes&&self.pmkids==other.pmkids&&
+        self.portal_clients==other.portal_clients&&self.portal_requests==other.portal_requests&&
+        self.probe_ssids==other.probe_ssids&&self.probe_rows==other.probe_rows&&
         self.ble_status==other.ble_status&&self.ble_frames==other.ble_frames&&
         self.rf_envelope==other.rf_envelope&&self.rf_peak==other.rf_peak&&self.rf_packets==other.rf_packets&&self.rf_dropped==other.rf_dropped&&
         self.usb_status==other.usb_status&&self.usb_percent==other.usb_percent&&self.usb_keystrokes==other.usb_keystrokes&&self.usb_unsupported==other.usb_unsupported&&self.usb_paused==other.usb_paused&&
@@ -131,8 +140,8 @@ impl App {
     pub fn wants_payloads(&self)->bool {
         matches!(self.screen,
             Screen::Group(Group::UsbHid)
-            |Screen::Setup(Tool::HidIntro|Tool::HidDucky)
-            |Screen::Running(Tool::HidIntro|Tool::HidDucky))
+            |Screen::Setup(Tool::HidIntro|Tool::HidDucky|Tool::BleHid)
+            |Screen::Running(Tool::HidIntro|Tool::HidDucky|Tool::BleHid))
     }
     pub fn set_device_state(&mut self,class:DeviceClass,state:DeviceState,detail:Option<&str>) {self.registry.upsert(class,state,detail);self.needs_render=true;}
     pub fn network_credentials(&self)->(String,String) {(self.ssid.clone(),self.password.clone())}
@@ -194,10 +203,13 @@ impl App {
         let mut fields=alloc::vec![Field::Run];
         match tool {
             Tool::WifiScan|Tool::WifiCapture|Tool::WifiHandshake|Tool::WifiWps|Tool::WifiClients|Tool::PktCapture|Tool::PktAnalyse=>fields.extend([Field::Channel,Field::Filter]),
+            Tool::WifiEvilTwin=>fields.extend([Field::Channel,Field::Ssid]),
+            Tool::WifiKarma=>fields.push(Field::Channel),
             Tool::WifiBeacon|Tool::WifiDeauth=>fields.extend([Field::Channel,Field::Target]),
             Tool::PktStream=>fields.extend([Field::Channel,Field::Filter,Field::Stream]),
             Tool::PktFiles=>fields.extend([Field::Target,Field::FileRecover]),
-            Tool::BleScan|Tool::BleSpam|Tool::BleGatt|Tool::BleHid=>fields.push(Field::Target),
+            Tool::BleScan|Tool::BleSpam|Tool::BleGatt=>fields.push(Field::Target),
+            Tool::BleHid=>fields.extend([Field::Payload,Field::Layout]),
             Tool::HidIntro|Tool::HidDucky=>fields.extend([Field::Payload,Field::Layout]),
             Tool::RfSpectrum=>fields.push(Field::Channel),
             Tool::RfCapture=>fields.extend([Field::Channel,Field::RfRate,Field::RfLength]),
@@ -272,7 +284,7 @@ impl App {
                 Button::Down if tool==Tool::PktFiles=>self.change_field(Field::Target,tool),
                 Button::Select if tool==Tool::PktFiles=>return Action::FilePreview(self.settings.target),
                 Button::Up=>self.scroll=self.scroll.saturating_sub(1),Button::Down=>self.scroll=(self.scroll+1).min(self.scroll_limit(&self.lines(tool,&self.live))),
-                Button::Select if tool.is_usb()=>{self.live.usb_paused=!self.live.usb_paused;return Action::Pause(self.live.usb_paused);},
+                Button::Select if tool.is_pausable()=>{self.live.usb_paused=!self.live.usb_paused;return Action::Pause(self.live.usb_paused);},
                 Button::Select|Button::Back|Button::Home=>{self.save_results(tool);self.scroll=0;self.screen=if matches!(button,Button::Home){Screen::Home}else{Screen::Results(tool)};return Action::Stop;},
             },
             Screen::Results(tool)=>match button {
@@ -287,7 +299,12 @@ impl App {
         }
         Action::None
     }
-    fn scroll_limit(&self,lines:&[String])->usize {lines.iter().map(|line|wrap(line,self.columns).len()).sum::<usize>().saturating_sub(1)}
+    fn scroll_limit(&self,lines:&[String])->usize {
+        lines.iter().map(|line|{
+            let indent=line.chars().take_while(|ch|*ch==' ').count().min(8).min(self.columns.saturating_sub(2));
+            wrap(line.trim_start_matches(' '),self.columns.saturating_sub(indent).max(1)).len()
+        }).sum::<usize>().saturating_sub(1)
+    }
     fn lines(&self,tool:Tool,live:&Live)->Vec<String> {
         let mut lines=Vec::new();
         match tool.group() {
@@ -374,11 +391,14 @@ impl App {
             Tool::WifiScan|Tool::WifiBeacon|Tool::WifiDeauth=>
                 Some((format!("{}",live.aps.len()),String::from("NETWORKS"),format!("{} FR",live.wifi_frames))),
             Tool::WifiHandshake=>Some((format!("{}",live.handshakes),String::from("HANDSHAKES"),format!("{} PMKID",live.pmkids))),
+            Tool::WifiEvilTwin=>Some((format!("{}",live.portal_clients),String::from("CLIENTS"),format!("{} REQ",live.portal_requests))),
+            Tool::WifiKarma=>Some((format!("{}",live.probe_ssids),String::from("PROBED"),format!("{} CLIENTS",live.probe_rows))),
             Tool::WifiCapture|Tool::WifiWps|Tool::WifiClients|Tool::PktCapture|Tool::PktAnalyse=>
                 Some((format!("{}",live.wifi_frames),String::from("FRAMES"),format!("{} DROP",live.wifi_dropped))),
             Tool::BleScan=>Some((format!("{}",live.ble_devices.len()),String::from("DEVICES"),format!("{} RPT",live.ble_frames))),
             Tool::BleSpam=>Some((format!("{}",live.ble_frames),String::from("REPORTS"),String::new())),
             Tool::HidIntro|Tool::HidDucky=>Some((format!("{}%",live.usb_percent),String::from("COMPLETE"),format!("{} KEYS",live.usb_keystrokes))),
+            Tool::BleHid=>Some((format!("{}%",live.usb_percent),String::from("COMPLETE"),format!("{} KEYS",live.usb_keystrokes))),
             Tool::RfSpectrum=>Some((format!("{}",live.rf_peak),String::from("CHANNEL"),String::from("PEAK"))),
             Tool::RfCapture=>Some((format!("{}",live.rf_packets),String::from("PACKETS"),format!("{} DROP",live.rf_dropped))),
             _=>None,
@@ -512,7 +532,7 @@ impl App {
                     Self::text(canvas,18,y+10,canvas.width()/2,&label,if run{theme::ACCENT}else if selected{theme::TEXT}else{theme::TEXT_DIM},bg,1);
                     Self::text_right(canvas,canvas.width().saturating_sub(16) as i16,y+10,canvas.width()/2,&value,if run{theme::ACCENT}else{theme::TEXT},bg,1);
                 }
-                if tool.is_usb() {
+                if tool.is_pausable() {
                     let y=50+fields.len().min(rows) as i16*30;
                     if y+18<self.bottom(canvas) {Self::text(canvas,10,y+2,canvas.width().saturating_sub(20),"SCRIPT",theme::TEXT_DIM,theme::BACKGROUND,1);self.render_lines(canvas,&self.live.usb_preview,y+16,0);}
                 }
@@ -527,7 +547,7 @@ impl App {
                     if !secondary.is_empty() {Self::text_right(canvas,canvas.width().saturating_sub(12) as i16,top+8,canvas.width()/2,&secondary,theme::TEXT_DIM,theme::BACKGROUND,1);}
                     top+=44;
                 }
-                if tool.is_usb() {draw_bar(canvas,Rect::new(10,top,canvas.width().saturating_sub(24),5),u16::from(live.usb_percent)*10,theme::ACCENT);top+=14;}
+                if tool.is_pausable() {draw_bar(canvas,Rect::new(10,top,canvas.width().saturating_sub(24),5),u16::from(live.usb_percent)*10,theme::ACCENT);top+=14;}
                 if tool==Tool::RfSpectrum&&!live.rf_envelope.is_empty()&&self.bottom(canvas)>top+46 {
                     let width=canvas.width().saturating_sub(24);let count=live.rf_envelope.len().min(usize::from(width)).max(1);
                     let baseline=top+44;
@@ -570,13 +590,20 @@ impl App {
     }
     fn render_lines(&self,canvas:&mut impl Canvas,lines:&[String],top:i16,scroll:usize) {
         let columns=usize::from(canvas.width().saturating_sub(24)/6).max(1);
-        let mut wrapped=Vec::new();
-        for line in lines {wrapped.extend(wrap(line,columns));}
+        // Leading spaces are a nesting depth (dissector output), so they become a
+        // pixel offset instead of being folded away by word-wrap.
+        let mut wrapped:Vec<(usize,String)>=Vec::new();
+        for line in lines {
+            let indent=line.chars().take_while(|ch|*ch==' ').count().min(8).min(columns.saturating_sub(2));
+            let width=columns.saturating_sub(indent).max(1);
+            for part in wrap(line.trim_start_matches(' '),width) {wrapped.push((indent,part));}
+        }
         let rows=((self.bottom(canvas)-top).max(0) as usize/14).max(1);
         let offset=scroll.min(wrapped.len().saturating_sub(rows));
-        for (row,line) in wrapped.iter().skip(offset).take(rows).enumerate() {
+        for (row,(indent,line)) in wrapped.iter().skip(offset).take(rows).enumerate() {
             let y=top+row as i16*14;if y+7>self.bottom(canvas){break;}
-            Self::text(canvas,10,y,canvas.width().saturating_sub(24),line,if row==0{theme::ACCENT}else{theme::TEXT},theme::BACKGROUND,1);
+            let x=10+(*indent as i16)*6;
+            Self::text(canvas,x,y,canvas.width().saturating_sub(24).saturating_sub((*indent as u16)*6),line,if row==0{theme::ACCENT}else{theme::TEXT},theme::BACKGROUND,1);
         }
         if wrapped.len()>rows {
             let h=(self.bottom(canvas)-top).max(0) as u16;
@@ -590,7 +617,7 @@ impl App {
         let y=Self::footer_y(canvas);canvas.fill_rect(Rect::new(0,y,canvas.width(),20),theme::SURFACE);
         let hint=match self.screen {
             Screen::Home=>"SEL  OPEN",Screen::Group(_)=>"SEL  RUN",
-            Screen::Setup(_)=>"SEL  CHANGE",Screen::Running(tool) if tool.is_usb()=>"SEL  PAUSE",
+            Screen::Setup(_)=>"SEL  CHANGE",Screen::Running(tool) if tool.is_pausable()=>"SEL  PAUSE",
             Screen::Running(Tool::PktFiles)=>"SEL  PREVIEW",
             Screen::Running(_)=>"BACK  STOP",Screen::Results(_)=>"SEL  SETUP",
             Screen::Edit(_,_)=>"BACK  SAVE",_=>"BACK  RETURN",
