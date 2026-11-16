@@ -20,7 +20,7 @@ use cyberdeck_core::wifi::ap::{Ssid,ChannelHopper};
 use cyberdeck_core::wifi::attack::{AttackMode, AttackPlan, AttackRunner};
 use cyberdeck_core::wifi::dhcp::{self,Lease};
 use cyberdeck_core::wifi::portal::{self,PortalConfig,PortalTemplate};
-use cyberdeck_core::wifi::frame::{self, FrameBuffer};
+use cyberdeck_core::wifi::frame::{self, FrameBuffer, FrameHeader};
 use esp_radio::wifi::ap::AccessPointInfo;
 use esp_radio::wifi::scan::ScanConfig;
 use esp_radio::wifi::sta::StationConfig;
@@ -117,8 +117,9 @@ pub struct WifiState {
     pub bytes: u64,
     pub dropped: u32,
     pub channel: u8,
-    /// Captive-portal counters, shown on the Evil Twin screen.
-    pub portal_clients: u32,
+    /// Captive-portal counters, shown on the Evil Twin screen. Clients are
+    /// counted once per device, not once per DHCP reply.
+    pub portal_macs: Vec<[u8; 6]>,
     pub portal_requests: u32,
 }
 
@@ -134,7 +135,7 @@ impl WifiState {
             bytes: 0,
             dropped: 0,
             channel: 1,
-            portal_clients: 0,
+            portal_macs: Vec::new(),
             portal_requests: 0,
         }
     }
@@ -147,7 +148,9 @@ static WIFI_COMMAND: Mutex<RefCell<Option<WifiCommand>>> = Mutex::new(RefCell::n
 pub enum WifiCommand {
     Scan,
     Capture { channel: u8 },
-    Observe { channel:u8,filter:CaptureFilter,record:bool },
+    /// `respond` answers probe requests with this deck's own beacon identity
+    /// (KARMA); all other observe sessions only listen.
+    Observe { channel:u8,filter:CaptureFilter,record:bool,respond:bool },
     Stream { channel:u8,filter:CaptureFilter },
     Connect { ssid:String,password:String },
     Disconnect,
@@ -237,7 +240,7 @@ fn security_label(method: esp_radio::wifi::AuthenticationMethod) -> &'static str
 pub async fn run(controller: WifiController<'static>) -> ! {
     let mut controller = controller;
     if let Err(error) = controller.set_config(&Config::Station(StationConfig::default())) {
-        set_status(&alloc::format!("station config failed: {error:?}"));
+        set_status(&alloc::format!("Wi-Fi setup failed: {error:?}"));
     }
     // Evil Twin network state survives between runs: the resources backing the
     // portal stack can only be initialized once per boot.
@@ -252,10 +255,10 @@ pub async fn run(controller: WifiController<'static>) -> ! {
                 attack_session(&mut controller, mode, channel, target).await;
             }
 
-            Some(WifiCommand::Observe{channel,filter,record})=>monitor_session(&mut controller,channel,filter,record,false).await,
-            Some(WifiCommand::Stream{channel,filter})=>monitor_session(&mut controller,channel,filter,false,true).await,
+            Some(WifiCommand::Observe{channel,filter,record,respond})=>monitor_session(&mut controller,channel,filter,record,false,respond).await,
+            Some(WifiCommand::Stream{channel,filter})=>monitor_session(&mut controller,channel,filter,false,true,false).await,
             Some(WifiCommand::Connect{ssid,password})=>connect_session(&mut controller,ACTIVE_TOKEN.load(Ordering::Acquire),ssid,password).await,
-            Some(WifiCommand::Disconnect)=>{if disconnect(&mut controller).await{set_status("station disconnected");}},
+            Some(WifiCommand::Disconnect)=>{if disconnect(&mut controller).await{set_status("Wi-Fi disconnected");}},
             Some(WifiCommand::Portal{ssid,channel,template})=>portal_session(&mut controller,ACTIVE_TOKEN.load(Ordering::Acquire),ssid,channel,template,&mut portal_net).await,
             Some(WifiCommand::Stop) => {}
             None => {}
@@ -298,9 +301,18 @@ fn finish_session(status: &str) {
 
 fn monitor_hopper(channel:u8)->Result<ChannelHopper,&'static str>{
     if channel==0{return Ok(ChannelHopper::new(cyberdeck_core::net::hop_plan(1,false),300));}
-    if channel>13{return Err("channel must be 0 (hop) or 1..13");}
-    let channel=Channel::new(channel).map_err(|_|"channel must be 0 (hop) or 1..13")?;
+    if channel>13{return Err("Pick All or a channel from 1 to 13");}
+    let channel=Channel::new(channel).map_err(|_|"Pick All or a channel from 1 to 13")?;
     Ok(ChannelHopper::fixed(channel))
+}
+/// Beginner-readable name for what the capture shows.
+fn filter_label(filter:&CaptureFilter)->&'static str{
+    if filter.eapol_only{"login attempts"}else if filter.management_only{"beacons"}else if filter.data_only{"data packets"}else{"all packets"}
+}
+/// One-line session description for the observe screens.
+fn observe_status(hopping:bool,channel:u8,filter:&CaptureFilter,respond:bool)->String{
+    let what=if respond{String::from("answering name requests")}else{String::from(filter_label(filter))};
+    if hopping{alloc::format!("Hopping channels (now {channel}); {what}")}else{alloc::format!("Channel {channel}; {what}")}
 }
 
 #[cfg(test)]
@@ -330,16 +342,16 @@ mod monitor_channel_tests {
     }
 }
 async fn capture_session(controller:&mut WifiController<'static>,channel:u8){
-    monitor_session(controller,channel,CaptureFilter::default(),true,false).await;
+    monitor_session(controller,channel,CaptureFilter::default(),true,false,false).await;
 }
-async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filter:CaptureFilter,record:bool,stream:bool){
-    let Ok(mut hopper)=monitor_hopper(channel)else{set_status("channel must be 0 (hop) or 1..13");return};
+async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filter:CaptureFilter,record:bool,stream:bool,respond:bool){
+    let Ok(mut hopper)=monitor_hopper(channel)else{set_status("Pick All or a channel from 1 to 13");return};
     if !disconnect(controller).await{return}
-    if stop_requested(){set_status("capture cancelled");return}
-    let Some(initial_channel)=hopper.current()else{set_status("no capture channels configured");return};
-    if let Err(e)=controller.set_channel(initial_channel.get(),SecondaryChannel::None){set_status(&alloc::format!("channel tune failed: {e:?}"));return}
-    if stream&&!super::usb::pcap_start(){set_status("USB CDC host not connected or stream busy");return}
-    if record&&!super::sd::ready(){set_status("capture requires mounted SD; use live observer");return}
+    if stop_requested(){set_status("Capture cancelled");return}
+    let Some(initial_channel)=hopper.current()else{set_status("No channels to listen on");return};
+    if let Err(e)=controller.set_channel(initial_channel.get(),SecondaryChannel::None){set_status(&alloc::format!("Could not set the channel: {e:?}"));return}
+    if stream&&!super::usb::pcap_start(){set_status("Connect the deck to the PC first");return}
+    if record&&!super::sd::ready(){set_status("Insert a card to record; Live capture works without one");return}
     reset_counters(initial_channel.get());
     reset_observations();
     let name=if record{super::sd::next_name("CAPTURE","PCAP")}else{String::new()};
@@ -349,8 +361,12 @@ async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filt
         }
     }else{None};
     let mut sniffer=controller.sniffer();sniffer.set_receive_cb(receive);
-    if let Err(e)=sniffer.set_promiscuous_mode(true){if stream{super::usb::pcap_finish();}set_status(&alloc::format!("sniffer unavailable: {e:?}"));return}
-    set_status(&if channel==0{alloc::format!("monitor hopping 1..13 (channel {}): {}",initial_channel.get(),filter.describe())}else{alloc::format!("monitor channel {channel}: {}",filter.describe())});
+    if let Err(e)=sniffer.set_promiscuous_mode(true){if stream{super::usb::pcap_finish();}set_status(&alloc::format!("Wi-Fi listener unavailable: {e:?}"));return}
+    set_status(&observe_status(channel==0,initial_channel.get(),&filter,respond));
+    // KARMA identity: a random locally-administered unicast address, so
+    // devices see one consistent "network" answering their name requests.
+    let mut karma_mac=[0u8;6];esp_hal::rng::Rng::new().read(&mut karma_mac);karma_mac[0]=(karma_mac[0]&0xFC)|0x02;
+    let mut replied:Vec<(MacAddr,Vec<u8>,u8)>=Vec::new();
     let session_start=embassy_time::Instant::now();
     let mut error=None;let mut last_publish=session_start;
     'session:loop{
@@ -358,10 +374,34 @@ async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filt
         // A bounded batch yields to the UI and storage even under a saturated channel.
         for _ in 0..RX_SLOTS{
             let Some(f)=critical_section::with(|cs|RX.borrow_ref_mut(cs).pop())else{break};
-            critical_section::with(|cs|{
-                OBSERVER.borrow_ref_mut(cs).on_frame(f.parser_bytes(),f.rssi,f.channel,f.timestamp_us,&filter,f.original_len);
+            let observation=critical_section::with(|cs|{
+                let observation=OBSERVER.borrow_ref_mut(cs).on_frame(f.parser_bytes(),f.rssi,f.channel,f.timestamp_us,&filter,f.original_len);
                 let mut s=WIFI_STATE.borrow_ref_mut(cs);s.frames=s.frames.saturating_add(1);s.bytes=s.bytes.saturating_add(u64::from(f.original_len));
+                observation
             });
+            // KARMA: answer a device's "where is X?" request once per identity,
+            // capped at three replies, with an open network using that name.
+            if respond{
+                if let cyberdeck_core::wifi::ap::Observation::ProbeRequest{client}=observation{
+                    if client!=MacAddr::new(karma_mac){
+                        if let Some(header)=FrameHeader::parse(f.parser_bytes()){
+                            if let Some(ssid)=frame::find_ssid(header.body){
+                                if !ssid.is_empty(){
+                                    let known=replied.iter_mut().find(|(c,s,_)|*c==client&&s.as_slice()==ssid);
+                                    if known.as_ref().map(|entry|entry.2<3).unwrap_or(true){
+                                        let response=frame::probe_response(client,MacAddr::new(karma_mac),ssid,f.channel,false);
+                                        let _=sniffer.send_raw_frame(false,response.as_slice(),true);
+                                        match known{Some(entry)=>entry.2+=1,None=>{
+                                            if replied.len()>=32{replied.remove(0);}
+                                            replied.push((client,ssid.to_vec(),1));
+                                        }}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             if filter.matches(f.parser_bytes()){
                 if let Some(writer)=pcap.as_mut(){
                     let freq=Channel::new(f.channel).map(|c|c.frequency_mhz()).unwrap_or(2412);
@@ -376,7 +416,7 @@ async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filt
                 let primary=next.get();
                 if let Err(e)=controller.set_channel(primary,SecondaryChannel::None){error=Some(alloc::format!("channel tune failed: {e:?}"));break 'session}
                 critical_section::with(|cs|WIFI_STATE.borrow_ref_mut(cs).channel=primary);
-                set_status(&alloc::format!("monitor hopping 1..13 (channel {primary}): {}",filter.describe()));
+                set_status(&observe_status(true,primary,&filter,respond));
             }
         }
         critical_section::with(|cs|WIFI_STATE.borrow_ref_mut(cs).dropped=RX.borrow_ref(cs).dropped);
@@ -386,15 +426,15 @@ async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filt
         embassy_time::Timer::after(embassy_time::Duration::from_millis(10)).await;
     }
     let disabled=sniffer.set_promiscuous_mode(false);drop(sniffer);
-    set_status("stopping; waiting for storage completion");
+    set_status("Stopping. Saving results...");
     let suffix=if let Some(writer)=pcap{
         match writer.finish(){
-            Ok((sink,stats))=>match sink.finish().await{Ok(bytes)=>if stream{alloc::format!("{} records queued to USB; {} B sent",stats.records,super::usb::pcap_status().1)}else{alloc::format!("{name}: {bytes} B saved, {} records",stats.records)},Err(e)=>alloc::format!("storage failed: {e}")},
-            Err(e)=>alloc::format!("PCAP finalize failed: {e:?}")
+            Ok((sink,stats))=>match sink.finish().await{Ok(bytes)=>if stream{let _=bytes;alloc::format!("Sent {} packets to the PC",stats.records)}else{alloc::format!("Saved {} packets to {name}",stats.records)},Err(e)=>alloc::format!("Saving failed: {e}")},
+            Err(e)=>alloc::format!("Could not finish saving: {e:?}")
         }
-    }else{String::from("live observations retained")};
+    }else{String::from("Results stay on screen")};
     let frames=snapshot().2;
-    set_status(&alloc::format!("stopped: {frames} frames; {suffix}{}{}",error.map(|e|alloc::format!("; capture error: {e}")).unwrap_or_default(),if disabled.is_err(){"; driver stop error"}else{""}));
+    set_status(&alloc::format!("Stopped after {frames} packets; {suffix}{}{}",error.map(|e|alloc::format!("; save problem: {e}")).unwrap_or_default(),if disabled.is_err(){"; radio stop problem"}else{""}));
 }
 async fn attack_session(controller: &mut WifiController<'static>, mode: AttackMode, channel: u8, target: Option<MacAddr>) {
     reset_counters(channel);
@@ -406,7 +446,8 @@ async fn attack_session(controller: &mut WifiController<'static>, mode: AttackMo
     // A selected AP turns broadcast deauth into a per-BSSID test; beacon spam
     // keeps rotating its own identity, so it never pins the runner.
     if let Some(bssid)=target{runner.set_bssids(&[bssid]);}
-    set_status(&match target{Some(bssid)=>alloc::format!("{} target {bssid}",mode.label()),None=>String::from(mode.label())});
+    let name=match mode{AttackMode::Deauth=>"Disconnect test",AttackMode::Disassoc=>"Soft disconnect",AttackMode::BeaconSpam=>"Fake networks",_=>mode.label()};
+    set_status(&match target{Some(bssid)=>alloc::format!("{name} on {bssid}"),None=>String::from(name)});
     let mut sniffer = controller.sniffer();
     let mut frame = FrameBuffer::new();
     loop {
@@ -417,7 +458,7 @@ async fn attack_session(controller: &mut WifiController<'static>, mode: AttackMo
                 .send_raw_frame(false, frame.as_slice(), true)
                 .is_err()
             {
-                finish_session("transmit rejected by driver");
+                finish_session("The radio refused to send");
                 return;
             }
             critical_section::with(|cs| {
@@ -429,24 +470,24 @@ async fn attack_session(controller: &mut WifiController<'static>, mode: AttackMo
             break;
         }
     }
-    finish_session(&alloc::format!("{} frames sent", runner.frames()));
+    finish_session(&alloc::format!("{} signals sent", runner.frames()));
 }
 
 #[derive(Clone)]
 pub struct ClientRow{pub mac:MacAddr,pub bssid:Option<MacAddr>,pub channel:u8,pub rssi:i8,pub frames:u32}
 impl ClientRow{
-    /// One display line for the "Nearby clients" screen.
+    /// One display line for the "Nearby devices" screen.
     pub fn line(&self)->String{
         let ap=match self.bssid {Some(bssid)=>alloc::format!("{bssid}"),None=>String::from("unknown AP")};
-        alloc::format!("{}  {}  ch {}  {} dBm  {} frames",self.mac,ap,self.channel,self.rssi,self.frames)
+        alloc::format!("{}  {}  ch {}  SIG {}  {} packets",self.mac,ap,self.channel,self.rssi,self.frames)
     }
 }
 #[derive(Clone)]
 pub struct WpsRow{pub bssid:MacAddr,pub channel:u8,pub rssi:i8,pub configured:bool,pub selected_registrar:bool}
 impl WpsRow{
-    /// One display line for the "WPS information" screen.
+    /// One display line for the "WPS info" screen.
     pub fn line(&self)->String{
-        alloc::format!("{}  ch {}  {} dBm  {}{}",self.bssid,self.channel,self.rssi,
+        alloc::format!("{}  ch {}  SIG {}  {}{}",self.bssid,self.channel,self.rssi,
             if self.configured{"configured"}else{"unconfigured"},
             if self.selected_registrar{"  registrar selected"}else{""})
     }
@@ -458,7 +499,7 @@ impl ProbeRow{
     /// One line for the Karma screen: requested name first, then who asked.
     pub fn line(&self)->String{
         let name=if self.ssid.is_empty(){"WILDCARD"}else{self.ssid.as_str()};
-        alloc::format!("{name}  {}  {}DBM",self.client,self.rssi)
+        alloc::format!("{name}  {}  SIG {}",self.client,self.rssi)
     }
 }
 pub struct PassiveSnapshot{pub aps:Vec<ApRow>,pub clients:Vec<ClientRow>,pub wps:Vec<WpsRow>,pub probes:Vec<ProbeRow>,pub probe_ssids:u32,pub frames:Vec<InspectorRow>,pub eapol:u32,pub handshakes:u32,pub pmkids:u32,pub histogram:String}
@@ -472,10 +513,18 @@ fn reset_observations(){critical_section::with(|cs|{*OBSERVER.borrow_ref_mut(cs)
 /// Portal address: the AP takes .1 and hands clients .100 and up on its own /24.
 const PORTAL_IP:[u8;4]=[192,168,4,1];
 fn portal_client_ip(mac:[u8;6])->[u8;4]{[PORTAL_IP[0],PORTAL_IP[1],PORTAL_IP[2],100+(mac[5]%100)]}
-fn note_portal_client(){critical_section::with(|cs|{let mut s=WIFI_STATE.borrow_ref_mut(cs);s.portal_clients=s.portal_clients.saturating_add(1);});}
+fn note_portal_client(mac:[u8;6]){
+    critical_section::with(|cs|{
+        let mut s=WIFI_STATE.borrow_ref_mut(cs);
+        if !s.portal_macs.contains(&mac){
+            if s.portal_macs.len()>=32{s.portal_macs.remove(0);}
+            s.portal_macs.push(mac);
+        }
+    });
+}
 fn note_portal_request(){critical_section::with(|cs|{let mut s=WIFI_STATE.borrow_ref_mut(cs);s.portal_requests=s.portal_requests.saturating_add(1);});}
 /// Captive-portal counters for the Evil Twin screen.
-pub fn portal_snapshot()->(u32,u32){critical_section::with(|cs|{let s=WIFI_STATE.borrow_ref(cs);(s.portal_clients,s.portal_requests)})}
+pub fn portal_snapshot()->(u32,u32){critical_section::with(|cs|{let s=WIFI_STATE.borrow_ref(cs);(s.portal_macs.len() as u32,s.portal_requests)})}
 
 /// Portal submissions persist across sessions so the tool stop can export them;
 /// `CredentialStore::new` is not const, hence the lazy Option.
@@ -506,7 +555,7 @@ async fn dhcp_service(stack:embassy_net::Stack<'static>)->!{
     let mut rx=[0u8;512];let mut tx=[0u8;512];
     let mut socket=UdpSocket::new(stack,&mut rx_meta,&mut rx,&mut tx_meta,&mut tx);
     if socket.bind(dhcp::SERVER_PORT).is_err(){
-        set_status("DHCP port unavailable");
+        set_status("Portal network services failed");
         loop{embassy_time::Timer::after(embassy_time::Duration::from_secs(1)).await;}
     }
     loop{
@@ -516,7 +565,7 @@ async fn dhcp_service(stack:embassy_net::Stack<'static>)->!{
             if let Some(reply)=dhcp::reply(&request[..length],&Lease::new(portal_client_ip(mac),PORTAL_IP)){
                 let target=(embassy_net::IpAddress::Ipv4(embassy_net::Ipv4Address::BROADCAST),dhcp::CLIENT_PORT);
                 let _=socket.send_to(&reply,target).await;
-                note_portal_client();
+                note_portal_client(mac);
             }
         }
     }
@@ -529,7 +578,7 @@ async fn dns_service(stack:embassy_net::Stack<'static>)->!{
     let mut rx=[0u8;512];let mut tx=[0u8;512];
     let mut socket=UdpSocket::new(stack,&mut rx_meta,&mut rx,&mut tx_meta,&mut tx);
     if socket.bind(53).is_err(){
-        set_status("DNS port unavailable");
+        set_status("Portal network services failed");
         loop{embassy_time::Timer::after(embassy_time::Duration::from_secs(1)).await;}
     }
     loop{
@@ -597,18 +646,18 @@ struct PortalNet{stack:embassy_net::Stack<'static>,runner:embassy_net::Runner<'s
 /// Evil Twin: open AP plus the three services a captive portal needs.
 async fn portal_session(controller:&mut WifiController<'static>,token:u32,ssid:String,channel:u8,template:PortalTemplate,portal_net:&mut Option<PortalNet>){
     if !disconnect(controller).await{return}
-    let Ok(name)=ssid.as_str().try_into()else{set_status("SSID exceeds 32 bytes");return};
+    let Ok(name)=ssid.as_str().try_into()else{set_status("Name too long (32 characters max)");return};
     let config=AccessPointConfig::default()
         .with_ssid(name)
         .with_channel(channel)
         .with_authentication(AuthenticationMethodConfig::Open);
     if let Err(error)=controller.set_config(&Config::AccessPoint(config)){
-        set_status(&alloc::format!("AP start failed: {error:?}"));return
+        set_status(&alloc::format!("Could not open the fake network: {error:?}"));return
     }
-    if stop_requested(){set_status("portal cancelled");return}
+    if stop_requested(){set_status("Cancelled");return}
     if portal_net.is_none(){
         let Some(interface)=esp_radio::wifi::Interface::try_access_point()else{
-            set_status("AP interface unavailable");return
+            set_status("Radio busy");return
         };
         static PORTAL_RESOURCES:StaticCell<embassy_net::StackResources<5>>=StaticCell::new();
         let seed=embassy_time::Instant::now().as_micros() as u64;
@@ -621,16 +670,16 @@ async fn portal_session(controller:&mut WifiController<'static>,token:u32,ssid:S
         let(stack,runner)=embassy_net::new(interface,net_config,PORTAL_RESOURCES.init(embassy_net::StackResources::new()),seed);
         *portal_net=Some(PortalNet{stack,runner});
     }
-    let Some(net)=portal_net.as_mut()else{set_status("portal stack unavailable");return};
+    let Some(net)=portal_net.as_mut()else{set_status("Portal failed to start; restart the deck");return};
     let portal_config=PortalConfig{template,ap_ip:PORTAL_IP,ssid,channel,capture_limit:16};
-    set_status(&alloc::format!("portal up: {}",portal_config.ssid));
+    set_status(&alloc::format!("Fake network live: {}",portal_config.ssid));
     let services=async{
         embassy_futures::join::join3(dhcp_service(net.stack),dns_service(net.stack),http_service(net.stack,&portal_config)).await
     };
     let running=async{embassy_futures::join::join(net.runner.run(),services).await};
     match select(running,wait_for_stop(token)).await{
         Either::First(_)=>{},
-        Either::Second(_)=>set_status("portal stopped"),
+        Either::Second(_)=>set_status("Fake network closed"),
     }
     // Leave the radio usable for the next session.
     let _=controller.set_config(&Config::Station(StationConfig::default()));
@@ -667,7 +716,7 @@ async fn disconnect(controller:&mut WifiController<'static>)->bool{
         // that state as an error. Being already disconnected is exactly what
         // every caller needs, so it must not abort capture/portal/connect.
         Ok(Err(esp_radio::wifi::WifiError::NotConnected))=>true,
-        Ok(Err(e))=>{set_status(&alloc::format!("disconnect failed: {e:?}"));false},Err(_)=>{set_status("disconnect timeout");false}
+        Ok(Err(e))=>{set_status(&alloc::format!("Radio problem: {e:?}"));false},Err(_)=>{set_status("Radio timed out");false}
     }
 }
 async fn connect_session(controller:&mut WifiController<'static>,id:u32,ssid:String,password:String){
@@ -676,12 +725,12 @@ async fn connect_session(controller:&mut WifiController<'static>,id:u32,ssid:Str
     let auth=if password.is_empty(){AuthenticationMethodConfig::Open}else{
         let Ok(pass)=password.as_str().try_into()else{set_status("password exceeds driver limit");return};AuthenticationMethodConfig::Wpa2Personal(pass)
     };
-    if let Err(e)=controller.set_config(&Config::Station(StationConfig::default().with_ssid(name).with_authentication(auth))){set_status(&alloc::format!("station config failed: {e:?}"));return}
-    set_status("connecting (30 second limit)");
+    if let Err(e)=controller.set_config(&Config::Station(StationConfig::default().with_ssid(name).with_authentication(auth))){set_status(&alloc::format!("Wi-Fi setup failed: {e:?}"));return}
+    set_status("Joining (up to 30 seconds)");
     match select(controller.connect_async(),cancelled_or_timeout(id,30)).await{
-        Either::First(Ok(info))=>set_status(&alloc::format!("connected {} on channel {}",info.ssid.as_str(),info.channel)),
-        Either::First(Err(e))=>set_status(&alloc::format!("connection failed: {e:?}")),
-        Either::Second(())=>{let cancelled=stop_requested();if disconnect(controller).await{set_status(if cancelled{"connection cancelled"}else{"connection timeout"});}}
+        Either::First(Ok(info))=>set_status(&alloc::format!("Joined {} (channel {})",info.ssid.as_str(),info.channel)),
+        Either::First(Err(e))=>set_status(&alloc::format!("Could not join: {e:?}")),
+        Either::Second(())=>{let cancelled=stop_requested();if disconnect(controller).await{set_status(if cancelled{"Joining cancelled"}else{"Joining timed out"});}}
     }
 }
 
@@ -694,10 +743,10 @@ async fn scan_session(controller:&mut WifiController<'static>){
             rows.sort_by_key(|r|-i16::from(r.rssi));rows.truncate(MAX_APS);
             let count=rows.len();let queued=super::export::save_wifi_findings(&rows);
             let observed_ms=embassy_time::Instant::now().as_millis();
-            critical_section::with(|cs|{let mut state=WIFI_STATE.borrow_ref_mut(cs);state.scan_aps=rows.clone();state.scan_ms=observed_ms;state.aps=rows;state.status=alloc::format!("{count} access points; {}",if queued{"inventory export queued"}else{"inventory retained"});});
+            critical_section::with(|cs|{let mut state=WIFI_STATE.borrow_ref_mut(cs);state.scan_aps=rows.clone();state.scan_ms=observed_ms;state.aps=rows;state.status=alloc::format!("{}; {}",if count==1{String::from("1 network found")}else{alloc::format!("{count} networks found")},if queued{"saved to card"}else{"no card to save to"});});
         }
-        Either::First(Err(e))=>set_status(&alloc::format!("scan failed: {e:?}")),
-        Either::Second(())=>set_status(if stop_requested(){"scan cancelled"}else{"scan timeout"}),
+        Either::First(Err(e))=>set_status(&alloc::format!("Scan failed: {e:?}")),
+        Either::Second(())=>set_status(if stop_requested(){"Scan cancelled"}else{"Scan timed out"}),
     }
 }
 /// Frame kind label for the packet inspector.

@@ -111,15 +111,15 @@ mod tests {
         assert_eq!(app.handle(Button::Select),Action::None);
         assert_eq!(app.handle(Button::Select),Action::None,"opening setup must not start a driver");
         let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);
-        assert!(canvas.text.contains("SETUP"));
+        assert!(canvas.text.contains("SETTINGS"));
         assert_eq!(app.handle(Button::Select),Action::Start(app::Tool::WifiScan));
         let mut live=Live::default();live.wifi_frames=42;app.set_live(live);
         assert_eq!(app.handle(Button::Back),Action::Stop);
         app.set_live(Live::default());
         let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);
-        assert!(canvas.text.contains("RESULTS"));assert!(canvas.text.contains("42 FR"),"stopping preserves the result even when driver counters reset");
+        assert!(canvas.text.contains("RESULTS"));assert!(canvas.text.contains("42 PACKETS"),"stopping preserves the result even when driver counters reset");
         app.handle(Button::Home);app.handle(Button::Select);app.handle(Button::Select);app.handle(Button::Up);app.handle(Button::Select);
-        let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);assert!(canvas.text.contains("42 FR"));
+        let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);assert!(canvas.text.contains("42 PACKETS"));
     }
     #[test]
     fn all_seven_modules_are_reachable_without_developer_badges() {
@@ -127,7 +127,7 @@ mod tests {
             let mut app=App::new(registry());for _ in 0..index{app.handle(Button::Down);}
             app.handle(Button::Select);
             let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);
-            let expected=["Wi-Fi","Packet","Bluetooth","USB / HID","Radio","GPS","Network","Diagnostics"][index];
+            let expected=["Wi-Fi","Capture","Bluetooth","USB Typing","Radio","GPS","Network","Diagnostics"][index];
             assert!(canvas.text.contains(expected),"missing module {expected}");
             for clutter in ["G01","G02","BUILT","NO HW","CYBERDECK"] {assert!(!canvas.text.contains(clutter));}
         }
@@ -287,7 +287,7 @@ mod tests {
         assert_eq!(app.handle(Button::Select), Action::Pause(true));
         let mut canvas = TestCanvas::new(240, 320);
         app.render(&mut canvas);
-        for text in ["Delivering selected script", "62%", "24 KEYS", "3 UNSUPPORTED", "PAUSED"] {
+        for text in ["Delivering selected script", "62%", "24 KEYS", "3 SKIPPED", "PAUSED"] {
             assert!(canvas.text.contains(text), "missing BLE HID status: {text}");
         }
         assert_eq!(app.handle(Button::Select), Action::Pause(false));

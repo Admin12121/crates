@@ -60,14 +60,14 @@ fn live()->Live {
     for (name,channel,rssi) in [("Workshop",6,-42),("Guest network",11,-67),("Sensor lab",1,-73)] {
         live.aps.push(platform::wifi::ApRow{ssid:name.into(),bssid:MacAddr::new([0x24,0x6f,0x28,0x10,channel,0x01]),channel,rssi,security:"WPA2"});
     }
-    live.ble_status="Passive scan".into();live.ble_frames=86;
+    live.ble_status="Scanning...".into();live.ble_frames=86;
     live.ble_devices.push(platform::ble::BleDevice{address:"C4:18:02:AA:BB:01".into(),name:"Lab sensor".into(),rssi:-48,kind:"Sensor",detail:"Temperature service advertised".into()});
     live.usb_status="Connected".into();live.usb_percent=62;live.usb_keystrokes=24;
     live.usb_preview=vec!["REM Local text example".into(),"DELAY 1000".into(),"STRING Admin12121".into(),"ENTER".into()];
     live.rf_peak=48;live.rf_packets=328;live.rf_dropped=0;
     live.rf_envelope=(0..126).map(|n|if (45..54).contains(&n){220-(n as i16-49).unsigned_abs() as u8*25}else{12+(n*7%36) as u8}).collect();
     live.gps_lines=vec!["3D fix  /  9 satellites".into(),"Latitude   27.7172 N".into(),"Longitude  85.3240 E".into(),"Altitude   1,342 m".into(),"Track points: 128".into()];
-    live.net_lines=vec!["Connected to Workshop".into(),"Address 192.168.1.42".into(),"Gateway 192.168.1.1".into(),"Signal -42 dBm".into()];
+    live.net_lines=vec!["Joined Workshop".into(),"Address 192.168.1.42".into(),"Router 192.168.1.1".into(),"Signal -42".into()];
     live
 }
 fn render(app:&mut App,width:u16,height:u16,path:&Path)->io::Result<()> {let mut image=Image::new(width,height);app.render(&mut image);image.save(path)}
@@ -96,10 +96,10 @@ fn main()->io::Result<()> {
     let mut karma=open(0,6,true);
     let mut karma_live=live();karma_live.probe_ssids=3;karma_live.probe_rows=4;
     karma_live.packet_lines=vec![
-        String::from("WORKSHOP  02:AA:BB:CC:DD:01  -48DBM"),
-        String::from("GUEST  02:AA:BB:CC:DD:02  -52DBM"),
-        String::from("SENSOR-LAB  02:AA:BB:CC:DD:03  -66DBM"),
-        String::from("WILDCARD  02:AA:BB:CC:DD:04  -71DBM"),
+        String::from("WORKSHOP  02:AA:BB:CC:DD:01  SIG -48"),
+        String::from("GUEST  02:AA:BB:CC:DD:02  SIG -52"),
+        String::from("SENSOR-LAB  02:AA:BB:CC:DD:03  SIG -66"),
+        String::from("WILDCARD  02:AA:BB:CC:DD:04  SIG -71"),
     ];
     karma.set_live(karma_live);
     render(&mut karma,240,320,&output.join("wifi-karma-240x320.png"))?;

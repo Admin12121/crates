@@ -12,14 +12,14 @@ pub enum Group { Wifi, Packet, Ble, UsbHid, Rf, Gps, Network }
 const GROUPS: [Group; 7] = [Group::Wifi, Group::Packet, Group::Ble, Group::UsbHid, Group::Rf, Group::Gps, Group::Network];
 impl Group {
     pub const fn title(self) -> &'static str {
-        match self { Self::Wifi=>"Wi-Fi",Self::Packet=>"Packet",Self::Ble=>"Bluetooth",Self::UsbHid=>"USB / HID",Self::Rf=>"Radio",Self::Gps=>"GPS",Self::Network=>"Network" }
+        match self { Self::Wifi=>"Wi-Fi",Self::Packet=>"Capture",Self::Ble=>"Bluetooth",Self::UsbHid=>"USB Typing",Self::Rf=>"Radio",Self::Gps=>"GPS",Self::Network=>"Network" }
     }
     const fn device(self)->DeviceClass {
         match self {Self::Wifi|Self::Packet|Self::Network=>DeviceClass::WifiRadio,Self::Ble=>DeviceClass::BleRadio,Self::UsbHid=>DeviceClass::UsbDevice,Self::Rf=>DeviceClass::Nrf24,Self::Gps=>DeviceClass::Gps}
     }
     pub const fn tools(self)->&'static [Tool] {
         match self {
-            Self::Wifi=>&[Tool::WifiScan,Tool::WifiCapture,Tool::WifiHandshake,Tool::WifiWps,Tool::WifiClients,Tool::WifiEvilTwin,Tool::WifiKarma,Tool::WifiBeacon,Tool::WifiDeauth],
+            Self::Wifi=>&[Tool::WifiScan,Tool::WifiCapture,Tool::WifiHandshake,Tool::WifiWps,Tool::WifiClients,Tool::WifiEvilTwin,Tool::WifiKarma,Tool::WifiBeacon,Tool::WifiDeauth,Tool::WifiDisassoc],
             Self::Packet=>&[Tool::PktCapture,Tool::PktAnalyse,Tool::PktFiles,Tool::PktStream],
             Self::Ble=>&[Tool::BleScan,Tool::BleSpam,Tool::BleGatt,Tool::BleHid],
             Self::UsbHid=>&[Tool::HidIntro,Tool::HidDucky],
@@ -32,7 +32,7 @@ impl Group {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
-    WifiScan, WifiCapture, WifiBeacon, WifiDeauth, WifiHandshake, WifiWps, WifiClients, WifiEvilTwin, WifiKarma,
+    WifiScan, WifiCapture, WifiBeacon, WifiDeauth, WifiDisassoc, WifiHandshake, WifiWps, WifiClients, WifiEvilTwin, WifiKarma,
     PktCapture, PktAnalyse, PktFiles, PktStream,
     BleScan, BleSpam, BleGatt, BleHid, HidIntro, HidDucky,
     RfSpectrum, RfCapture, GpsStatus, GpsRecord, GpsWardrive,
@@ -41,19 +41,19 @@ pub enum Tool {
 impl Tool {
     pub const fn title(self)->&'static str {
         match self {
-            Self::WifiScan=>"AP scan",Self::WifiCapture=>"Monitor capture",Self::WifiBeacon=>"Beacon test",Self::WifiDeauth=>"Deauth test",
-            Self::WifiHandshake=>"Handshake observer",Self::WifiWps=>"WPS information",Self::WifiClients=>"Nearby clients",
-            Self::WifiEvilTwin=>"Evil twin",Self::WifiKarma=>"Karma probes",
-            Self::PktCapture=>"Live capture",Self::PktAnalyse=>"Frame inspector",Self::PktFiles=>"Capture files",Self::PktStream=>"USB packet stream",
-            Self::BleScan=>"Device scan",Self::BleSpam=>"Advertising",Self::BleGatt=>"GATT services",Self::BleHid=>"BLE keyboard",
-            Self::HidIntro=>"HID test",Self::HidDucky=>"Payload library",Self::RfSpectrum=>"Channel monitor",Self::RfCapture=>"Packet capture",
-            Self::GpsStatus=>"Position and fix",Self::GpsRecord=>"Record track",Self::GpsWardrive=>"Wardrive log",
-            Self::NetInfo=>"Connect / info",Self::NetDiscover=>"Discover hosts",Self::NetProbe=>"Probe host",Self::NetServices=>"Service check",
+            Self::WifiScan=>"Scan Wi-Fi",Self::WifiCapture=>"Record Wi-Fi",Self::WifiBeacon=>"Fake networks",Self::WifiDeauth=>"Disconnect test",Self::WifiDisassoc=>"Soft disconnect",
+            Self::WifiHandshake=>"Password capture",Self::WifiWps=>"WPS info",Self::WifiClients=>"Nearby devices",
+            Self::WifiEvilTwin=>"Evil twin",Self::WifiKarma=>"Name requests",
+            Self::PktCapture=>"Live capture",Self::PktAnalyse=>"Packet details",Self::PktFiles=>"Saved captures",Self::PktStream=>"Stream to PC",
+            Self::BleScan=>"Scan Bluetooth",Self::BleSpam=>"Fake devices",Self::BleGatt=>"Device services",Self::BleHid=>"Bluetooth keyboard",
+            Self::HidIntro=>"Typing test",Self::HidDucky=>"Script library",Self::RfSpectrum=>"Channel activity",Self::RfCapture=>"Radio capture",
+            Self::GpsStatus=>"GPS position",Self::GpsRecord=>"Record route",Self::GpsWardrive=>"Wardrive log",
+            Self::NetInfo=>"Join Wi-Fi",Self::NetDiscover=>"Find devices",Self::NetProbe=>"Check device",Self::NetServices=>"Open ports",
         }
     }
     pub const fn group(self)->Group {
         match self {
-            Self::WifiScan|Self::WifiCapture|Self::WifiBeacon|Self::WifiDeauth|Self::WifiHandshake|Self::WifiWps|Self::WifiClients|Self::WifiEvilTwin|Self::WifiKarma=>Group::Wifi,
+            Self::WifiScan|Self::WifiCapture|Self::WifiBeacon|Self::WifiDeauth|Self::WifiDisassoc|Self::WifiHandshake|Self::WifiWps|Self::WifiClients|Self::WifiEvilTwin|Self::WifiKarma=>Group::Wifi,
             Self::PktCapture|Self::PktAnalyse|Self::PktFiles|Self::PktStream=>Group::Packet,
             Self::BleScan|Self::BleSpam|Self::BleGatt|Self::BleHid=>Group::Ble,
             Self::HidIntro|Self::HidDucky=>Group::UsbHid,Self::RfSpectrum|Self::RfCapture=>Group::Rf,
@@ -207,7 +207,7 @@ impl App {
             Tool::WifiScan|Tool::WifiCapture|Tool::WifiHandshake|Tool::WifiWps|Tool::WifiClients|Tool::PktCapture|Tool::PktAnalyse=>fields.extend([Field::Channel,Field::Filter]),
             Tool::WifiEvilTwin=>fields.extend([Field::Channel,Field::Ssid]),
             Tool::WifiKarma=>fields.push(Field::Channel),
-            Tool::WifiDeauth=>fields.extend([Field::Channel,Field::Target]),
+            Tool::WifiDeauth|Tool::WifiDisassoc=>fields.extend([Field::Channel,Field::Target]),
             Tool::WifiBeacon=>fields.push(Field::Channel),
             Tool::PktStream=>fields.extend([Field::Channel,Field::Filter,Field::Stream]),
             Tool::PktFiles=>fields.extend([Field::Target,Field::FileRecover]),
@@ -231,7 +231,7 @@ impl App {
             Field::Layout=>self.settings.layout=match self.settings.layout {KeyboardLayout::Us=>KeyboardLayout::Uk,KeyboardLayout::Uk=>KeyboardLayout::De,KeyboardLayout::De=>KeyboardLayout::Us},
             Field::Payload=>if !self.payloads.is_empty(){self.settings.payload=((usize::from(self.settings.payload)+1)%self.payloads.len()) as u8;},
             Field::Target=>{
-                let count=match tool {Tool::PktFiles=>self.live.capture_files.len(),Tool::WifiBeacon|Tool::WifiDeauth=>self.live.aps.len(),Tool::BleScan|Tool::BleGatt|Tool::BleHid=>self.live.ble_devices.len(),_=>255};
+                let count=match tool {Tool::PktFiles=>self.live.capture_files.len(),Tool::WifiBeacon|Tool::WifiDeauth|Tool::WifiDisassoc=>self.live.aps.len(),Tool::BleScan|Tool::BleGatt|Tool::BleHid=>self.live.ble_devices.len(),_=>255};
                 self.settings.target=if matches!(tool,Tool::NetProbe|Tool::NetServices|Tool::NetDiscover){self.settings.target%254+1}else{((usize::from(self.settings.target)+1)%count.max(1)) as u8};
             },
             Field::Campaign=>self.settings.campaign=(self.settings.campaign+1)%cyberdeck_core::ble::spam::SpamCampaign::all().len() as u8,
@@ -318,13 +318,13 @@ impl App {
         match tool.group() {
             Group::Wifi|Group::Packet=>{
                 if !live.wifi_status.is_empty(){lines.push(live.wifi_status.clone());}
-                if matches!(tool,Tool::WifiScan|Tool::WifiBeacon|Tool::WifiDeauth) {
+                if matches!(tool,Tool::WifiScan|Tool::WifiBeacon|Tool::WifiDeauth|Tool::WifiDisassoc) {
                     // One line per network: name first, then the two numbers that matter.
                     for ap in live.aps.iter().take(32) {
                         let name=if ap.ssid.is_empty(){"HIDDEN"}else{ap.ssid.as_str()};
-                        lines.push(format!("{name}  CH{}  {}DBM",ap.channel,ap.rssi));
+                        lines.push(format!("{name}  CH {}  SIG {}",ap.channel,ap.rssi));
                     }
-                    if live.aps.is_empty(){lines.push(String::from("No networks observed yet."));}
+                    if live.aps.is_empty(){lines.push(String::from("No networks found yet"));}
                 }
                 if tool==Tool::PktFiles {for (index,name) in live.capture_files.iter().enumerate(){lines.push(format!("{} {}",if index==usize::from(self.settings.target){">"}else{" "},name));}}
                 lines.extend(live.packet_lines.iter().take(128).cloned());
@@ -337,55 +337,60 @@ impl App {
                     if tool==Tool::BleGatt {lines.extend(live.packet_lines.iter().take(128).cloned());}
                     for device in live.ble_devices.iter().take(32) {
                         let name=if device.name.is_empty(){"UNNAMED"}else{device.name.as_str()};
-                        lines.push(format!("{name}  {}DBM  {}",device.rssi,device.kind));
+                        lines.push(format!("{name}  SIG {}  {}",device.rssi,device.kind));
                     }
                 }
             },
             Group::UsbHid=>lines.push(live.usb_status.clone()),
-            Group::Rf=>lines.push(format!("{} DROPPED",live.rf_dropped)),
+            Group::Rf=>lines.push(format!("{} MISSED",live.rf_dropped)),
             Group::Gps=>lines.extend(live.gps_lines.iter().take(128).cloned()),
             Group::Network=>lines.extend(live.net_lines.iter().take(128).cloned()),
         }
         if tool.is_pausable() {
             if live.usb_paused{lines.push(String::from("PAUSED"));}
-            if live.usb_unsupported>0 {lines.push(format!("{} UNSUPPORTED",live.usb_unsupported));}
+            if live.usb_unsupported>0 {lines.push(format!("{} SKIPPED",live.usb_unsupported));}
         }
         lines.extend(live.result_lines.iter().take(128).cloned());
         if let Some(status)=&live.export_status{lines.push(status.clone());}
-        if let Some(message)=&live.message{lines.push(message.clone());}
-        if lines.is_empty(){lines.push(String::from("Waiting for device data..."));}
+        // The outcome often repeats the status line; show it only once.
+        if let Some(message)=&live.message{if lines.first().map(String::as_str)!=Some(message.as_str()){lines.push(message.clone());}}
+        if lines.is_empty(){lines.push(String::from("Waiting for data..."));}
         lines
     }
     fn field_label(&self,field:Field,tool:Tool)->(String,String) {
         match field {
-            Field::Run=>(String::from(if tool==Tool::NetInfo {"Connect / refresh"}else{"Run"}),String::from("Start")),
-            Field::Channel=>(String::from("Channel"),if self.settings.channel==0&&tool.group()!=Group::Rf {String::from("Hop")}else{format!("{}",self.settings.channel)}),
-            Field::Filter=>(String::from("Frame filter"),String::from(match self.settings.filter {PacketFilter::All=>"All frames",PacketFilter::Management=>"Management",PacketFilter::Data=>"Data",PacketFilter::Eapol=>"EAPOL"})),
+            Field::Run=>(String::from(if tool==Tool::NetInfo {"Join / refresh"}else{"Start"}),String::from("GO")),
+            Field::Channel=>(String::from("Channel"),if self.settings.channel==0&&tool.group()!=Group::Rf {String::from("All")}else{format!("{}",self.settings.channel)}),
+            Field::Filter=>(String::from("Packet type"),String::from(match self.settings.filter {PacketFilter::All=>"Everything",PacketFilter::Management=>"Beacons",PacketFilter::Data=>"Data",PacketFilter::Eapol=>"Logins"})),
             Field::Layout=>(String::from("Keyboard layout"),String::from(match self.settings.layout {KeyboardLayout::Us=>"US",KeyboardLayout::Uk=>"UK",KeyboardLayout::De=>"German"})),
-            Field::Payload=>(String::from("Payload"),self.payloads.get(usize::from(self.settings.payload)).cloned().unwrap_or_else(||String::from("No payloads loaded"))),
-            Field::RfRate=>(String::from("RF data rate"),String::from(match self.settings.rf_rate {0=>"250 kbps",2=>"2 Mbps",_=>"1 Mbps"})),
-            Field::RfLength=>(String::from("RF payload length"),format!("{} bytes",self.settings.rf_payload_len)),
-            Field::FileRecover=>(String::from("Recover selected file"),String::from("Repair an interrupted capture")),
+            Field::Payload=>(String::from("Script"),self.payloads.get(usize::from(self.settings.payload)).cloned().unwrap_or_else(||String::from("No scripts yet"))),
+            Field::RfRate=>(String::from("Radio speed"),String::from(match self.settings.rf_rate {0=>"Slow",2=>"Fast",_=>"Normal"})),
+            Field::RfLength=>(String::from("Packet size"),format!("{} bytes",self.settings.rf_payload_len)),
+            Field::FileRecover=>(String::from("Fix broken capture"),String::from("Repair a partial file")),
             Field::Target=>{
                 let target=usize::from(self.settings.target);
                 let name=match tool {
-                    Tool::WifiBeacon|Tool::WifiDeauth=>self.live.aps.get(target).map(|ap|ap.ssid.clone()).unwrap_or_else(||String::from("No network observed")),
+                    Tool::WifiBeacon|Tool::WifiDeauth|Tool::WifiDisassoc=>self.live.aps.get(target).map(|ap|ap.ssid.clone()).unwrap_or_else(||String::from("No network observed")),
                     Tool::BleScan|Tool::BleGatt|Tool::BleHid=>self.live.ble_devices.get(target).map(|device|if device.name.is_empty(){device.address.clone()}else{device.name.clone()}).unwrap_or_else(||String::from("No device observed")),
-                    Tool::NetProbe|Tool::NetServices=>format!("Local host .{}",self.settings.target),
+                    Tool::NetProbe|Tool::NetServices=>format!("Local device .{}",self.settings.target),
                     Tool::PktFiles=>self.live.capture_files.get(target).cloned().unwrap_or_else(||String::from("No capture selected")),
                     _=>format!("Item {}",target+1),
                 };
-                (String::from("Target"),name)
+                let label=match tool {
+                    Tool::WifiDeauth|Tool::WifiDisassoc=>"Pick network",Tool::BleScan|Tool::BleGatt|Tool::BleHid=>"Pick device",
+                    Tool::PktFiles=>"Pick file",Tool::NetProbe|Tool::NetServices=>"Device IP",_=>"Target",
+                };
+                (String::from(label),name)
             },
             Field::Campaign=>{
                 let label=cyberdeck_core::ble::spam::SpamCampaign::from_index(usize::from(self.settings.campaign)).map(|campaign|campaign.label()).unwrap_or("Unknown");
                 (String::from("Campaign"),String::from(label))
             },
-            Field::Stream=>(String::from("USB stream"),String::from(if self.settings.stream {"Enabled"}else{"Disabled"})),
-            Field::Network=>(String::from("Scanned network"),self.live.aps.get(usize::from(self.settings.target)).map(|ap|ap.ssid.clone()).unwrap_or_else(||String::from("Scan Wi-Fi first"))),
-            Field::Ssid=>(String::from("SSID"),if self.ssid.is_empty(){String::from("Select to enter")}else{self.ssid.clone()}),
-            Field::Password=>(String::from("Password"),if self.password.is_empty(){String::from("Open / select to enter")}else{"*".repeat(self.password.len().min(16))}),
-            Field::Previous=>(String::from("Last result"),String::from("Open saved session")),
+            Field::Stream=>(String::from("Stream to PC"),String::from(if self.settings.stream {"On"}else{"Off"})),
+            Field::Network=>(String::from("Wi-Fi network"),self.live.aps.get(usize::from(self.settings.target)).map(|ap|ap.ssid.clone()).unwrap_or_else(||String::from("Run a scan first"))),
+            Field::Ssid=>(String::from("Network name"),if self.ssid.is_empty(){String::from("Press to type")}else{self.ssid.clone()}),
+            Field::Password=>(String::from("Password"),if self.password.is_empty(){String::from("Press to type")}else{"*".repeat(self.password.len().min(16))}),
+            Field::Previous=>(String::from("Last run"),String::from("View the last results")),
         }
     }
     fn text(canvas:&mut impl Canvas,x:i16,y:i16,width:u16,text:&str,fg:Rgb565,bg:Rgb565,scale:u8) {
@@ -404,20 +409,23 @@ impl App {
     }
     /// The one number that screen exists to show, plus a caption and a side note.
     fn headline(tool:Tool,live:&Live)->Option<(String,String,String)> {
+        let plural=|n:usize,one:&str,many:&str|String::from(if n==1 {one}else{many});
         match tool {
-            Tool::WifiScan|Tool::WifiBeacon|Tool::WifiDeauth=>
-                Some((format!("{}",live.aps.len()),String::from("NETWORKS"),format!("{} FR",live.wifi_frames))),
-            Tool::WifiHandshake=>Some((format!("{}",live.handshakes),String::from("HANDSHAKES"),format!("{} PMKID",live.pmkids))),
-            Tool::WifiEvilTwin=>Some((format!("{}",live.portal_clients),String::from("CLIENTS"),format!("{} REQ",live.portal_requests))),
-            Tool::WifiKarma=>Some((format!("{}",live.probe_ssids),String::from("PROBED"),format!("{} CLIENTS",live.probe_rows))),
+            Tool::WifiScan|Tool::WifiBeacon|Tool::WifiDeauth|Tool::WifiDisassoc=>{
+                let count=live.aps.len();
+                Some((format!("{count}"),plural(count,"NETWORK","NETWORKS"),if live.wifi_frames>0 {format!("{} PACKETS",live.wifi_frames)}else{String::new()}))
+            },
+            Tool::WifiHandshake=>Some((format!("{}",live.handshakes),plural(live.handshakes as usize,"LOGIN","LOGINS"),format!("{} KEYS",live.pmkids))),
+            Tool::WifiEvilTwin=>Some((format!("{}",live.portal_clients),String::from("JOINED"),format!("{} VISITS",live.portal_requests))),
+            Tool::WifiKarma=>Some((format!("{}",live.probe_ssids),plural(live.probe_ssids as usize,"NAME","NAMES"),format!("{} DEVICES",live.probe_rows))),
             Tool::WifiCapture|Tool::WifiWps|Tool::WifiClients|Tool::PktCapture|Tool::PktAnalyse=>
-                Some((format!("{}",live.wifi_frames),String::from("FRAMES"),format!("{} DROP",live.wifi_dropped))),
-            Tool::BleScan=>Some((format!("{}",live.ble_devices.len()),String::from("DEVICES"),format!("{} RPT",live.ble_frames))),
-            Tool::BleSpam=>Some((format!("{}",live.ble_frames),String::from("REPORTS"),String::new())),
+                Some((format!("{}",live.wifi_frames),plural(live.wifi_frames as usize,"PACKET","PACKETS"),format!("{} MISSED",live.wifi_dropped))),
+            Tool::BleScan=>Some((format!("{}",live.ble_devices.len()),plural(live.ble_devices.len(),"DEVICE","DEVICES"),format!("{} SIGNALS",live.ble_frames))),
+            Tool::BleSpam=>Some((format!("{}",live.ble_frames),String::from("SENT"),String::new())),
             Tool::HidIntro|Tool::HidDucky=>Some((format!("{}%",live.usb_percent),String::from("COMPLETE"),format!("{} KEYS",live.usb_keystrokes))),
             Tool::BleHid=>Some((format!("{}%",live.usb_percent),String::from("COMPLETE"),format!("{} KEYS",live.usb_keystrokes))),
-            Tool::RfSpectrum=>Some((format!("{}",live.rf_peak),String::from("CHANNEL"),String::from("PEAK"))),
-            Tool::RfCapture=>Some((format!("{}",live.rf_packets),String::from("PACKETS"),format!("{} DROP",live.rf_dropped))),
+            Tool::RfSpectrum=>Some((format!("{}",live.rf_peak),String::from("CHANNEL"),String::from("BUSIEST"))),
+            Tool::RfCapture=>Some((format!("{}",live.rf_packets),plural(live.rf_packets as usize,"PACKET","PACKETS"),format!("{} MISSED",live.rf_dropped))),
             _=>None,
         }
     }
@@ -475,11 +483,11 @@ impl App {
         let (title,subtitle)=match self.screen {
             Screen::Home=>(cyberdeck_core::DEVICE_NAME,""),
             Screen::Group(group)=>(group.title(),""),
-            Screen::Setup(tool)=>(tool.title(),"SETUP"),
+            Screen::Setup(tool)=>(tool.title(),"SETTINGS"),
             Screen::Running(tool)=>(tool.title(),if self.live.usb_paused{"PAUSED"}else{"LIVE"}),
             Screen::Results(tool)=>(tool.title(),"RESULTS"),
-            Screen::Unavailable(tool)=>(tool.title(),"UNAVAILABLE"),
-            Screen::Edit(_,password)=>(if password{"PASSWORD"}else{"SSID"},""),
+            Screen::Unavailable(tool)=>(tool.title(),"CAN'T START"),
+            Screen::Edit(_,password)=>(if password{"PASSWORD"}else{"NETWORK NAME"},""),
             Screen::Diagnostics=>("Diagnostics",""),
         };
         self.header(canvas,title,subtitle);
@@ -582,8 +590,8 @@ impl App {
             },
             Screen::Unavailable(tool)=>{
                 canvas.fill_rect(Rect::new(0,45,canvas.width(),canvas.height().saturating_sub(65)),theme::BACKGROUND);
-                let reason=self.unavailable(tool).unwrap_or_else(||String::from("This tool is available. Return and select it again."));
-                self.render_lines(canvas,&[reason,String::from("Other modules remain available.")],56,0);
+                let reason=self.unavailable(tool).unwrap_or_else(||String::from("This tool is ready. Go back and open it again."));
+                self.render_lines(canvas,&[reason,String::from("Other tools still work.")],56,0);
             },
             Screen::Edit(_,password)=>{
                 canvas.fill_rect(Rect::new(0,45,canvas.width(),canvas.height().saturating_sub(65)),theme::BACKGROUND);
@@ -633,14 +641,17 @@ impl App {
     fn render_footer(&self,canvas:&mut impl Canvas) {
         let y=Self::footer_y(canvas);canvas.fill_rect(Rect::new(0,y,canvas.width(),20),theme::SURFACE);
         let hint=match self.screen {
-            Screen::Home=>"SEL  OPEN",Screen::Group(_)=>"SEL  RUN",
+            Screen::Home=>"SEL  OPEN",Screen::Group(_)=>"SEL  START",
             Screen::Setup(_)=>"SEL  CHANGE",Screen::Running(tool) if tool.is_pausable()=>"SEL  PAUSE",
             Screen::Running(Tool::PktFiles)=>"SEL  PREVIEW",
-            Screen::Running(_)=>"BACK  STOP",Screen::Results(_)=>"SEL  SETUP",
+            Screen::Running(_)=>"BACK  STOP",Screen::Results(_)=>"SEL  SETTINGS",
             Screen::Edit(_,_)=>"BACK  SAVE",_=>"BACK  RETURN",
         };
         Self::text(canvas,10,y+6,canvas.width().saturating_sub(20),hint,theme::TEXT_DIM,theme::SURFACE,1);
+        // Results screens already show the outcome as content; the pop-up band
+        // would repeat it.
         if let Some(message)=&self.live.message {
+            if matches!(self.screen,Screen::Results(_)){return;}
             let top=y-32;canvas.fill_rect(Rect::new(0,top,canvas.width(),32),theme::SURFACE_ALT);
             let columns=usize::from(canvas.width().saturating_sub(16)/6).max(1);
             for (row,line) in wrap(message,columns).iter().take(2).enumerate(){Self::text(canvas,8,top+5+row as i16*12,canvas.width().saturating_sub(16),line,theme::WARNING,theme::SURFACE_ALT,1);}

@@ -169,7 +169,7 @@ impl<'d> RfRuntime<'d> {
 fn export_findings(tool:Option<Tool>,rf:&RfRuntime<'_>){
     if tool==Some(Tool::WifiScan){let(_,aps,_,_)=wifi::snapshot();let _=export::save_wifi_findings(&aps);}
     if tool==Some(Tool::WifiEvilTwin){let _=export::save_portal_credentials(&wifi::portal_csv());}
-    if matches!(tool,Some(Tool::WifiScan|Tool::WifiCapture|Tool::WifiHandshake|Tool::WifiWps|Tool::WifiClients)){
+    if matches!(tool,Some(Tool::WifiScan|Tool::WifiCapture|Tool::WifiHandshake|Tool::WifiWps|Tool::WifiClients|Tool::WifiKarma|Tool::PktCapture|Tool::PktStream|Tool::PktAnalyse)){
         let _=export::save_wifi_hashes(&wifi::passive_hashes());
     }
     if matches!(tool,Some(Tool::BleScan|Tool::BleSpam|Tool::BleGatt)){let(_,devices,frames)=ble::snapshot();let _=export::save_ble_history(&devices,frames,&ble::gatt_snapshot());}
@@ -490,17 +490,17 @@ async fn main(spawner: Spawner) -> ! {
             if !wifi::busy()&&!ble::busy(){
                 match control::start(tool,&mut app,&mut rf,flags){Ok(())=>{active_tool=Some(tool);started_ms=now_ms;},Err(reason)=>app.finish(reason)}
                 pending_rf=None;
-            }else if now_ms.saturating_sub(since)>3000{app.finish("Radio still stopping; retry after it becomes idle");pending_rf=None;}
+            }else if now_ms.saturating_sub(since)>3000{app.finish("Radio is still stopping. Try again in a moment");pending_rf=None;}
         }
         while let Some(line)=usb::take_console_line(){
             if let Some(value)=line.strip_prefix("NET "){
                 if let Some((ssid,password))=value.split_once('|'){
                     match cyberdeck_core::network::Credentials::new(ssid,password) {
-                        Ok(credentials)=>{if wifi::submit(WifiCommand::Connect{ssid:credentials.ssid,password:credentials.password}){app.set_message("Wi-Fi connection requested");}else{app.set_message("Wi-Fi busy; stop the active tool first");}},
+                        Ok(credentials)=>{if wifi::submit(WifiCommand::Connect{ssid:credentials.ssid,password:credentials.password}){app.set_message("Joining that network...");}else{app.set_message("Wi-Fi busy. Stop the running tool first");}},
                         Err(reason)=>app.set_message(reason),
                     }
-                }else{app.set_message("Use NET ssid|password on the local USB console");}
-            }else if line=="STOP"{control::stop(&mut rf);active_tool=None;pending_rf=None;app.finish("Stopped from the local USB console");}
+                }else{app.set_message("USB console: NET name|password");}
+            }else if line=="STOP"{export_findings(active_tool,&rf);control::stop(&mut rf);active_tool=None;pending_rf=None;app.finish("Stopped from the USB console");}
         }
         if let Some((index,recover))=file_action {
             let(status,files)=sd::library_snapshot();
@@ -508,8 +508,8 @@ async fn main(spawner: Spawner) -> ! {
                 if let Some(file)=files.get(index){
                     file_last_name=file.name.clone();
                     let accepted=if recover{sd::request_recover(&file.name)}else{sd::request_preview(&file.name)};
-                    app.set_message(if accepted{"File operation queued"}else{"Storage busy; retry"});
-                }else{app.set_message("Select a file number from the capture library");}
+                    app.set_message(if accepted{"Opening the file..."}else{"Card busy. Try again"});
+                }else{app.set_message("Pick a file in Saved captures");}
                 file_action=None;
             }else if status.starts_with("0 files")||status.contains("empty")||status.contains("failed")||status.contains("unavailable"){app.set_message(&status);file_action=None;}
         }
@@ -534,17 +534,22 @@ async fn main(spawner: Spawner) -> ! {
             match active_tool {
                 Some(Tool::WifiClients)=>{
                     packet_lines.extend(passive.clients.iter().map(|row|row.line()));
-                    if passive.clients.is_empty(){packet_lines.push(String::from("No stations observed yet."));}
+                    if passive.clients.is_empty(){packet_lines.push(String::from("No devices seen yet"));}
                 },
                 Some(Tool::WifiWps)=>{
                     packet_lines.extend(passive.wps.iter().map(|row|row.line()));
-                    if passive.wps.is_empty(){packet_lines.push(String::from("No WPS information elements observed yet."));}
+                    if passive.wps.is_empty(){packet_lines.push(String::from("No WPS details seen yet"));}
                 },
                 Some(Tool::WifiHandshake)=>{},
                 _=>{for frame in passive.frames.iter().take(4){packet_lines.push(frame.summary.clone());packet_lines.push(frame.metadata.clone());packet_lines.push(frame.hex.clone());}},
             }
             if active_tool==Some(Tool::PktAnalyse){packet_lines=wifi::dissect_latest();}
             if active_tool==Some(Tool::WifiKarma){packet_lines=passive.probes.iter().map(|row|row.line()).collect();}
+            if active_tool==Some(Tool::RfCapture){
+                let mut packets:Vec<String>=rf.log.iter().map(|packet|packet.render_line(34)).collect();
+                packets.reverse();
+                packet_lines=packets.into_iter().take(16).collect();
+            }
             let(storage_status,files)=sd::library_snapshot();
             let capture_files=files.iter().enumerate().map(|(i,file)|alloc::format!("{} {} {} B",i+1,file.name,file.bytes)).collect();
             if active_tool==Some(Tool::PktFiles){packet_lines=alloc::vec![storage_status];if !file_last_name.is_empty(){packet_lines.push(file_last_name.clone());}packet_lines.extend(sd::preview().lines().take(24).map(String::from));}
@@ -558,13 +563,13 @@ async fn main(spawner: Spawner) -> ! {
                 rf_envelope:rf.envelope(),rf_peak:rf.spectrum.peak_channel().unwrap_or(0),rf_packets:rf.packets,rf_dropped:rf.log.dropped(),
                 ble_status:ble_status.clone(),ble_devices,ble_frames,usb_status:usb_status.clone(),usb_percent,usb_keystrokes,usb_unsupported,
                 buttons:buttons.levels(),probe_lines,message:app.message(),usb_paused:app.usb_paused(),
-                gps_lines:gps::snapshot(),net_lines,packet_lines,result_lines:Vec::new(),usb_preview:preview,capture_files,export_status:Some(sd::status_line())};
+                gps_lines:gps::snapshot(),net_lines,packet_lines,result_lines:Vec::new(),usb_preview:preview,capture_files,export_status:if sd::ready(){None}else{Some(sd::status_line())}};
             app.set_live(live);
             if now_ms.saturating_sub(started_ms)>300 {
                 let finished=match active_tool{
                     Some(Tool::WifiScan|Tool::WifiCapture|Tool::WifiHandshake|Tool::WifiWps|Tool::WifiClients|Tool::PktCapture|Tool::PktAnalyse|Tool::PktStream) if !wifi::busy()=>Some(wifi_status.as_str()),
                     Some(Tool::NetInfo|Tool::NetDiscover|Tool::NetProbe|Tool::NetServices) if !net_busy=>Some(net_status.as_str()),
-                    Some(Tool::HidIntro|Tool::HidDucky) if usb_status=="script delivered"||usb_status.starts_with("USB delivery failed")||usb_status.starts_with("parse")=>Some(usb_status.as_str()),
+                    Some(Tool::HidIntro|Tool::HidDucky) if usb_status=="Script sent"||usb_status.starts_with("Sending failed")||usb_status.starts_with("parse")=>Some(usb_status.as_str()),
                     Some(Tool::BleGatt) if !ble::busy()=>Some(ble_status.as_str()),
                     _=>None,
                 };

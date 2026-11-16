@@ -69,7 +69,7 @@ static NEXT:Mutex<RefCell<u32>>=Mutex::new(RefCell::new(0));
 static TICKET:Mutex<RefCell<u32>>=Mutex::new(RefCell::new(0));
 fn publish(status:&str,mounted:bool){critical_section::with(|cs|{let mut s=STATE.borrow_ref_mut(cs);s.mounted=mounted;s.status=String::from(status);});}
 pub fn ready()->bool{critical_section::with(|cs|STATE.borrow_ref(cs).mounted)}
-pub fn status_line()->String{critical_section::with(|cs|{let s=STATE.borrow_ref(cs);alloc::format!("SD: {} ({} files, {} B)",if s.status.is_empty(){"not mounted"}else{&s.status},s.files,s.bytes)})}
+pub fn status_line()->String{critical_section::with(|cs|{let s=STATE.borrow_ref(cs);alloc::format!("Card: {} ({} files)",if s.status.is_empty(){"not mounted"}else{&s.status},s.files)})}
 pub fn completion(ticket:u32)->Option<WriteResult>{critical_section::with(|cs|STATE.borrow_ref(cs).completed.iter().find(|r|r.ticket==ticket).cloned())}
 pub fn library_snapshot()->(String,Vec<FileRow>){critical_section::with(|cs|{let s=STATE.borrow_ref(cs);(s.status.clone(),s.library.clone())})}
 pub fn preview()->String{critical_section::with(|cs|STATE.borrow_ref(cs).preview.clone())}
@@ -85,7 +85,7 @@ pub fn enqueue_owned(name:&str,bytes:Vec<u8>,append:bool)->Result<u32,Vec<u8>>{
         if jobs.len()>=QUEUE_DEPTH||queued+bytes.len()>QUEUE_BYTES{return Err(bytes)}
         let mut next=TICKET.borrow_ref_mut(cs);*next=next.wrapping_add(1);let ticket=*next;
         jobs.push_back(Request::Write(Job{ticket,name:String::from(name),append,bytes}));
-        STATE.borrow_ref_mut(cs).status=alloc::format!("queued {name}");Ok(ticket)
+        STATE.borrow_ref_mut(cs).status=alloc::format!("saving {name}");Ok(ticket)
     })
 }
 fn request(request:Request)->bool{critical_section::with(|cs|{
@@ -175,7 +175,7 @@ async fn recover<D:embedded_sdmmc::BlockDevice>(m:&Manager<D>,v:embedded_sdmmc::
     let closed=m.close_file(destination).map_err(|_|"recovery close failed");
     let dir=m.close_dir(root).map_err(|_|"directory close failed");
     result?;closed_source?;closed?;dir?;
-    Ok(alloc::format!("Recovered {output}: {records} records, {bytes} B; original kept"))
+    Ok(alloc::format!("Fixed {output}: {records} packets recovered; original kept"))
 }
 /// Root folder that groups every on-card payload type, so a future RF or Wi-Fi
 /// payload set cannot collide with the HID scripts.
@@ -208,11 +208,11 @@ fn scan_payloads<D:embedded_sdmmc::BlockDevice>(m:&Manager<D>,v:embedded_sdmmc::
     let root=m.open_root_dir(v).map_err(|_|"directory open failed")?;
     let payloads=match m.open_dir(root,PAYLOAD_ROOT){
         Ok(d)=>d,
-        Err(_)=>{let _=m.close_dir(root);return Err("create PAYLOADS/HID on the card")}
+        Err(_)=>{let _=m.close_dir(root);return Err("add a PAYLOADS/HID folder on the card")}
     };
     let hid=match m.open_dir(payloads,HID_PAYLOAD_DIR){
         Ok(d)=>{let _=m.close_dir(payloads);d}
-        Err(_)=>{let _=m.close_dir(payloads);let _=m.close_dir(root);return Err("create PAYLOADS/HID on the card")}
+        Err(_)=>{let _=m.close_dir(payloads);let _=m.close_dir(root);return Err("add a PAYLOADS/HID folder on the card")}
     };
     let mut names:Vec<String>=Vec::new();
     let scanned=m.iterate_dir(hid,|entry|{
@@ -237,8 +237,8 @@ fn scan_payloads<D:embedded_sdmmc::BlockDevice>(m:&Manager<D>,v:embedded_sdmmc::
 pub async fn run(bus:SdBus<'static>)->!{
     let card=SdCard::new(bus,Delay::new());let manager=VolumeManager::new(card,FixedClock);
     let volume=match manager.open_volume(VolumeIdx(0)){
-        Ok(v)=>{let raw=v.to_raw_volume();match list_files(&manager,raw){Ok(files)=>{critical_section::with(|cs|STATE.borrow_ref_mut(cs).library=files);publish("mounted",true)},Err(e)=>publish(e,false)}Some(raw)}
-        Err(_)=>{publish("no FAT volume",false);None}
+        Ok(v)=>{let raw=v.to_raw_volume();match list_files(&manager,raw){Ok(files)=>{critical_section::with(|cs|STATE.borrow_ref_mut(cs).library=files);publish("card ready",true)},Err(e)=>publish(e,false)}Some(raw)}
+        Err(_)=>{publish("no readable card",false);None}
     };
     loop{
         let request=critical_section::with(|cs|JOBS.borrow_ref_mut(cs).pop_front());
@@ -249,17 +249,17 @@ pub async fn run(bus:SdBus<'static>)->!{
                     critical_section::with(|cs|{
                         let mut s=STATE.borrow_ref_mut(cs);let success=result.is_ok();let bytes=result.as_ref().copied().unwrap_or(0);
                         let error=result.err().unwrap_or("");
-                        if success{s.files=s.files.saturating_add(u32::from(!job.append));s.bytes=s.bytes.saturating_add(bytes);s.status=alloc::format!("saved {} ({} B)",job.name,bytes);}
+                        if success{s.files=s.files.saturating_add(u32::from(!job.append));s.bytes=s.bytes.saturating_add(bytes);s.status=alloc::format!("saved {}",job.name);}
                         else{s.status=alloc::format!("{}: {error}",job.name);if s.failed.len()<8&&!s.failed.contains(&job.name){s.failed.push(job.name.clone());}}
                         if s.completed.len()>=24{s.completed.pop_front();}
                         s.completed.push_back(WriteResult{ticket:job.ticket,name:job.name,bytes,success,error:String::from(error)});
                     });
                 }
-                Request::List=>match list_files(&manager,v){Ok(files)=>{let count=files.len();critical_section::with(|cs|STATE.borrow_ref_mut(cs).library=files);publish(&alloc::format!("{count} files (max {MAX_FILES})"),true)},Err(e)=>publish(e,false)},
-                Request::Preview(name)=>match file_preview(&manager,v,&name){Ok(text)=>{critical_section::with(|cs|STATE.borrow_ref_mut(cs).preview=text);publish("preview loaded",true)},Err(e)=>publish(e,false)},
+                Request::List=>match list_files(&manager,v){Ok(files)=>{let count=files.len();critical_section::with(|cs|STATE.borrow_ref_mut(cs).library=files);publish(&alloc::format!("{count} files"),true)},Err(e)=>publish(e,false)},
+                Request::Preview(name)=>match file_preview(&manager,v,&name){Ok(text)=>{critical_section::with(|cs|STATE.borrow_ref_mut(cs).preview=text);publish("Preview ready",true)},Err(e)=>publish(e,false)},
                 Request::Recover(name)=>match recover(&manager,v,&name).await{Ok(text)=>publish(&text,true),Err(e)=>publish(e,false)},
                 Request::Payloads=>match scan_payloads(&manager,v){
-                    Ok(scripts)=>{let count=scripts.len();critical_section::with(|cs|*SCANNED.borrow_ref_mut(cs)=Some(scripts));publish(&alloc::format!("{count} payload scripts on card"),true)},
+                    Ok(scripts)=>{let count=scripts.len();critical_section::with(|cs|*SCANNED.borrow_ref_mut(cs)=Some(scripts));publish(&alloc::format!("{count} scripts on card"),true)},
                     Err(e)=>publish(e,false),
                 },
             }}

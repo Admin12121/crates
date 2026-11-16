@@ -351,11 +351,10 @@ pub fn route(request: &HttpRequest) -> PortalAction {
         return PortalAction::ServePortal;
     }
     if CAPTIVE_PROBE_PATHS.contains(&path) {
-        return match path {
-            "/connecttest.txt" => PortalAction::PlainOk("Microsoft Connect Test"),
-            "/ncsi.txt" => PortalAction::PlainOk("Microsoft NCSI"),
-            _ => PortalAction::Redirect,
-        };
+        // The OS probes these paths to decide "the internet works". Answering
+        // with the expected text would suppress the login page; a redirect
+        // tells the OS there is a captive portal and opens it.
+        return PortalAction::Redirect;
     }
     if path == "/" || path == "/index.html" || path.starts_with("/portal") {
         return PortalAction::ServePortal;
@@ -608,7 +607,7 @@ mod tests {
         );
         assert_eq!(
             route(&request("GET /ncsi.txt HTTP/1.1\r\nHost: x\r\n\r\n")),
-            PortalAction::PlainOk("Microsoft NCSI")
+            PortalAction::Redirect
         );
     }
 

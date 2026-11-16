@@ -40,8 +40,10 @@ impl<const A:usize,const S:usize,const H:usize,const R:usize> Default for Passiv
 }
 impl<const A:usize,const S:usize,const H:usize,const R:usize> PassiveEngine<A,S,H,R> {
     pub const fn new()->Self {Self {scan:ScanEngine::new(),handshakes:HandshakeStore::new(),frames:Vec::new(),wps:Vec::new(),probes:Vec::new(),latest:LatestFrame::new(),histogram:ProtocolHistogram {beacons:0,probe_requests:0,probe_responses:0,authentication:0,association:0,deauthentication:0,disassociation:0,action:0,eapol:0,data:0,control:0,other:0,malformed:0}}}
-    pub fn on_frame(&mut self,data:&[u8],rssi:i8,channel:u8,ts_us:u64,filter:&CaptureFilter,original_len:u32) {
-        self.scan.on_frame(data,rssi,channel,ts_us/1000);
+    /// Feed one captured frame. Returns how the scan engine classified it, so
+    /// active features (KARMA) can react to the frame they just observed.
+    pub fn on_frame(&mut self,data:&[u8],rssi:i8,channel:u8,ts_us:u64,filter:&CaptureFilter,original_len:u32)->crate::wifi::ap::Observation {
+        let observation=self.scan.on_frame(data,rssi,channel,ts_us/1000);
         if let Some(header)=FrameHeader::parse(data) {
             if header.fc.is_management() && matches!(header.fc.subtype,frame::subtype::BEACON | frame::subtype::PROBE_RESP) {
                 let ies=header.ies();
@@ -66,16 +68,17 @@ impl<const A:usize,const S:usize,const H:usize,const R:usize> PassiveEngine<A,S,
                 }
             }
         }
-        if !filter.matches(data) {return}
+        if !filter.matches(data) {return observation}
         self.latest.set(data);
         self.histogram.count(classify(data).0);
-        if R==0 {return}
+        if R==0 {return observation}
         let summary=PacketSummary::build(self.scan.frames,Timestamp::from_micros(ts_us),data,channel,rssi);
         let row=InspectorRow {summary:summary.render_line(64),
             metadata:alloc::format!("{} us | {} -> {} | ch{} {} dBm | {} / {} B",ts_us,summary.source,summary.destination,channel,rssi,data.len(),original_len),
             hex:hexdump(data,8)};
         if self.frames.len()>=R {self.frames.pop();}
         self.frames.insert(0,row);
+        observation
     }
     /// Record a probe request, merging repeats from the same station and SSID.
     fn note_probe(&mut self,client:MacAddr,ssid:&[u8],channel:u8,rssi:i8) {

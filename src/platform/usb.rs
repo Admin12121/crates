@@ -229,16 +229,16 @@ async fn hid_loop<'d,D:Driver<'d>>(mut writer:HidWriter<'d,D,9>)->! {
         let command=critical_section::with(|cs| COMMAND.borrow_ref_mut(cs).take());
         if let Some((token,command))=command {
             if !CONFIGURED.load(Ordering::Acquire) {
-                publish("Connect USB host, then Run",0,0,0);
+                publish("Plug into a PC, then press Start",0,0,0);
             } else if current(token) {
                 let (name,body,layout)=match command {
                     UsbCommand::RunText{name,source,layout} => {
-                        if name.len()>64 || source.len()>8192 || cyberdeck_core::hid::engine::validate_payload_name(&name).is_err() {publish("Payload exceeds bounds or invalid name",0,0,0);continue;}
+                        if name.len()>64 || source.len()>8192 || cyberdeck_core::hid::engine::validate_payload_name(&name).is_err() {publish("Script too big or wrongly named",0,0,0);continue;}
                         (name,source,layout)
                     }
                     other => {
                         let(index,layout)=match other {UsbCommand::RunPayload{index,layout}=>(index,layout),_=>(0,Layout::Us)};
-                        let Some((name,body))=super::payload::resolve(index) else {publish("Unknown payload",0,0,0);continue;};
+                        let Some((name,body))=super::payload::resolve(index) else {publish("Unknown script",0,0,0);continue;};
                         (name,body,layout)
                     }
                 };
@@ -271,7 +271,7 @@ async fn hid_loop<'d,D:Driver<'d>>(mut writer:HidWriter<'d,D,9>)->! {
                         }
                         let released=release_all(&mut writer).await;
                         let p=engine.progress();
-                        publish(if failed || !released {"USB delivery failed; reconnect"} else if !current(token) {"cancelled; reports released"} else {"script delivered"},p.percent,engine.keystrokes(),engine.unsupported_chars());
+                        publish(if failed || !released {"Sending failed. Replug the USB cable"} else if !current(token) {"Stopped. Keys released"} else {"Script sent"},p.percent,engine.keystrokes(),engine.unsupported_chars());
                     }
                 }
             }
@@ -375,7 +375,7 @@ pub async fn run(usb:esp_hal::usb::otg::Usb<'static>)->! {
     let(sender,receiver)=cdc.split();
     let mut device=builder.build();
     critical_section::with(|cs|STATE.borrow_ref_mut(cs).installed=true);
-    publish("idle; select payload then Run",0,0,0);
+    publish("Pick a script, then press Start",0,0,0);
     // device.run is created once and never dropped during polls or HID writes.
     embassy_futures::join::join(device.run(),embassy_futures::join::join3(hid_loop(writer),cdc_send(sender),cdc_receive(receiver))).await;
     unreachable!()

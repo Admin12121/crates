@@ -13,7 +13,7 @@ use cyberdeck_core::ble::ad::{AdvReport, BleAddress};
 use cyberdeck_core::ble::spam::{SpamCampaign, SpamRotator};
 use cyberdeck_core::ble::vendor::classify;
 use cyberdeck_core::hid::{ConsumerReport, KeyboardReport, Layout, MouseReport};
-use cyberdeck_core::hid::engine::{BUILTIN_SCRIPTS, HidEngine, Output};
+use cyberdeck_core::hid::engine::{HidEngine, Output};
 use cyberdeck_core::hid::session::SessionQueue;
 use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -161,7 +161,7 @@ pub async fn run(controller:BleController)->! {
     let host=async {
         loop {
             if runner.run_with_handler(&Observer).await.is_err() {
-                set_status("BLE transport failed; restart device");
+                set_status("Bluetooth failed. Restart the deck");
                 critical_section::with(|cs|STATE.borrow_ref_mut(cs).online=false);
                 COMMAND_STOP();
                 Timer::after(Duration::from_secs(1)).await;
@@ -193,7 +193,7 @@ async fn actor(stack:&BleStack<'_>)->! {
             SCANNING.store(false,Ordering::Release);
             let scan_off=with_timeout(Duration::from_millis(1000),stack.command(LeSetScanEnable::new(false,false))).await;
             let adv_off=with_timeout(Duration::from_millis(1000),stack.command(LeSetAdvEnable::new(false))).await;
-            if !matches!(scan_off,Ok(Ok(()))) || !matches!(adv_off,Ok(Ok(()))) {set_status("BLE cleanup failed; restart device");}
+            if !matches!(scan_off,Ok(Ok(()))) || !matches!(adv_off,Ok(Ok(()))) {set_status("Bluetooth reset failed. Restart the deck");}
             else if let Err(message)=result {set_status(message);}
             ACTIVE.store(false,Ordering::Release);
         }
@@ -203,14 +203,14 @@ async fn actor(stack:&BleStack<'_>)->! {
 async fn scan(stack:&BleStack<'_>,token:u32,active:bool,interval_ms:u16,window_ms:u16)->Result<(),&'static str> {
     let interval=u32::from(interval_ms.clamp(10,10240));let window=u32::from(window_ms).clamp(3,interval);
     critical_section::with(|cs|{let mut s=STATE.borrow_ref_mut(cs);s.devices.clear();s.frames=0;s.gatt.clear();});
-    set_status(if active{"active scan"}else{"passive scan"});
+    set_status("Scanning...");
     command(stack,token,LeSetScanParams::new(if active{LeScanKind::Active}else{LeScanKind::Passive},HciDuration::from_millis(interval),HciDuration::from_millis(window),AddrKind::RANDOM,ScanningFilterPolicy::BasicUnfiltered)).await?;
     SCAN_TOKEN.store(token,Ordering::Release);SCANNING.store(true,Ordering::Release);
     // Keep duplicates: RSSI/name changes must update a stable-size device table.
     command(stack,token,LeSetScanEnable::new(true,false)).await?;
     cancelled(token).await;
     let count=critical_section::with(|cs|STATE.borrow_ref(cs).devices.len());
-    set_status(&alloc::format!("scan stopped: {count} devices"));Ok(())
+    set_status(&alloc::format!("Scan stopped. {count} devices"));Ok(())
 }
 async fn advertise(stack:&BleStack<'_>,token:u32,campaign:SpamCampaign)->Result<(),&'static str> {
     set_status(campaign.label());critical_section::with(|cs|STATE.borrow_ref_mut(cs).frames=0);
@@ -230,13 +230,13 @@ async fn advertise(stack:&BleStack<'_>,token:u32,campaign:SpamCampaign)->Result<
         let _=bounded(token,200,Timer::after(Duration::from_millis(100))).await;
     }
     let frames=critical_section::with(|cs|STATE.borrow_ref(cs).frames);
-    set_status(&alloc::format!("{frames} frames advertised"));Ok(())
+    set_status(&alloc::format!("{frames} signals sent"));Ok(())
 }
 fn gatt_line(line:String){critical_section::with(|cs|{let mut s=STATE.borrow_ref_mut(cs);if s.gatt.len()<72{s.gatt.push(line);}});}
 async fn inspect(stack:&BleStack<'_>,token:u32,index:u8)->Result<(),&'static str> {
     let target=critical_section::with(|cs|STATE.borrow_ref(cs).devices.get(usize::from(index)).map(|d|d.raw)).ok_or("select a scanned device")?;
     critical_section::with(|cs|STATE.borrow_ref_mut(cs).gatt.clear());
-    set_status("GATT connecting (read-only)");
+    set_status("Reading device info...");
     let mut central=stack.central();let filter=[target];
     let config=ConnectConfig{scan_config:ScanConfig{filter_accept_list:&filter,active:false,..Default::default()},connect_params:Default::default()};
     let conn=bounded(token,12000,central.connect(&config)).await?.map_err(|_|"GATT connection failed")?;
@@ -264,7 +264,7 @@ async fn inspect(stack:&BleStack<'_>,token:u32,index:u8)->Result<(),&'static str
                     gatt_line(row);
                 }
             }
-            set_status(&alloc::format!("GATT: {} services; read-only",services.len()));Ok(())
+            set_status(&alloc::format!("Found {} services",services.len()));Ok(())
         };
         match select(client.task(),discover).await {
             Either::First(_)=>Err("GATT peer disconnected"),Either::Second(result)=>result,
@@ -304,11 +304,11 @@ async fn hid_output(reports:&HidReports,conn:&GattConnection<'_,'_,DefaultPacket
         Output::Consumer(report)=>reports.consumer.notify(conn,&report.to_bytes(),true).await,
         Output::Mouse(report)=>reports.mouse.notify(conn,&report.to_bytes(),true).await,
         Output::ReleaseAll=>{
-            reports.keyboard.notify(conn,&KeyboardReport{modifiers:0,keycodes:[0;6]}.to_bytes(),true).await.map_err(|_|"BLE keyboard release failed")?;
-            reports.consumer.notify(conn,&ConsumerReport{usage:0}.to_bytes(),true).await.map_err(|_|"BLE consumer release failed")?;
+            reports.keyboard.notify(conn,&KeyboardReport{modifiers:0,keycodes:[0;6]}.to_bytes(),true).await.map_err(|_|"Keyboard release failed")?;
+            reports.consumer.notify(conn,&ConsumerReport{usage:0}.to_bytes(),true).await.map_err(|_|"Key release failed")?;
             reports.mouse.notify(conn,&MouseReport{buttons:0,dx:0,dy:0,wheel:0}.to_bytes(),true).await
         }
-    }.map_err(|_|"BLE HID report failed")
+    }.map_err(|_|"Sending the keystroke failed")
 }
 async fn hid_listen(stack:&BleStack<'_>,token:u32,payload:u8,layout:Layout)->Result<(),&'static str> {
     let mut keyboard=[0;8];let mut consumer=[0;2];let mut mouse=[0;4];
@@ -317,23 +317,23 @@ async fn hid_listen(stack:&BleStack<'_>,token:u32,payload:u8,layout:Layout)->Res
     // Ordinary discoverable HOGP, enabled only by the local Pair action.
     let adv=[2,1,6,3,3,0x12,0x18,3,0x19,0xC1,0x03];
     let scan=[16,9,b'A',b'd',b'm',b'i',b'n',b'1',b'2',b'1',b'2',b'1',b' ',b'H',b'I',b'D'];
-    set_status("Pair Admin12121 HID from host");
-    let advertiser=bounded(token,5000,peripheral.advertise(&AdvertisementParameters::default(),Advertisement::ConnectableScannableUndirected{adv_data:&adv,scan_data:&scan})).await?.map_err(|_|"HID advertising failed")?;
-    let raw=bounded(token,60000,advertiser.accept()).await?.map_err(|_|"HID connection failed")?;
-    let conn=raw.with_attribute_server(&server).map_err(|_|"HID attribute server unavailable")?;
+    set_status("On your device, pair with Admin12121 HID");
+    let advertiser=bounded(token,5000,peripheral.advertise(&AdvertisementParameters::default(),Advertisement::ConnectableScannableUndirected{adv_data:&adv,scan_data:&scan})).await?.map_err(|_|"Bluetooth advertising failed")?;
+    let raw=bounded(token,60000,advertiser.accept()).await?.map_err(|_|"No device connected")?;
+    let conn=raw.with_attribute_server(&server).map_err(|_|"Keyboard service failed")?;
     let _=conn.raw().request_security();
     HID_CONNECTED.store(true,Ordering::Release);
     HID_PAUSED.store(false,Ordering::Release);
     // Queue the chosen script now; it runs as soon as the host has paired and
     // subscribed, so pairing on the phone is the only user step.
     critical_section::with(|cs|*HID_PAYLOAD.borrow_ref_mut(cs)=Some((payload,layout)));
-    set_status("HID connected; pair, then select Run");
+    set_status("Connected. Pair, then press Start");
     let events=async {
         loop {match conn.next().await {
-            GattConnectionEvent::Disconnected{..}=>return Err("HID host disconnected"),
+            GattConnectionEvent::Disconnected{..}=>return Err("Device disconnected"),
             GattConnectionEvent::Gatt{event}=>if let Ok(reply)=event.accept(){reply.send().await;},
-            GattConnectionEvent::PairingComplete{bond,..}|GattConnectionEvent::Encrypted{bond,..}=>{if let Some(bond)=bond {let _=stack.add_bond_information(bond);}set_status("HID paired; select payload and Run");},
-            GattConnectionEvent::PairingFailed(_)=>set_status("HID pairing failed; retry from host"),
+            GattConnectionEvent::PairingComplete{bond,..}|GattConnectionEvent::Encrypted{bond,..}=>{if let Some(bond)=bond {let _=stack.add_bond_information(bond);}set_status("Paired. Press Start to type");},
+            GattConnectionEvent::PairingFailed(_)=>set_status("Pairing failed. Retry on your device"),
             _=>{}
         }}
     };
@@ -341,32 +341,33 @@ async fn hid_listen(stack:&BleStack<'_>,token:u32,payload:u8,layout:Layout)->Res
         while current(token) {
             let next=critical_section::with(|cs|HID_PAYLOAD.borrow_ref_mut(cs).take());
             if let Some((index,layout))=next {
-                if !conn.raw().security_level().map(|level|level.encrypted()).unwrap_or(false) {set_status("Pair from host before Run");continue;}
-                if !reports.keyboard.should_notify(&conn) {set_status("Host has not subscribed to HID reports");continue;}
-                let Some((name,source))=BUILTIN_SCRIPTS.get(usize::from(index)) else {set_status("Unknown HID payload");continue;};
-                let script=cyberdeck_core::hid::ducky::parse(name,source).map_err(|_|"HID payload parse failed")?;
+                if !conn.raw().security_level().map(|level|level.encrypted()).unwrap_or(false) {set_status("Pair first, then press Start");continue;}
+                if !reports.keyboard.should_notify(&conn) {set_status("Waiting for the host to listen");continue;}
+                // Same resolver as USB: built-in scripts first, then card scripts.
+                let Some((name,source))=super::payload::resolve(index) else {set_status("Unknown script");continue;};
+                let script=cyberdeck_core::hid::ducky::parse(&name,&source).map_err(|_|"Script could not be read")?;
                 let mut engine=HidEngine::new(&script,layout);let mut paused_before=false;
                 while !engine.is_finished() {
                     if !current(token){engine.stop();}
                     let paused=HID_PAUSED.load(Ordering::Acquire);
-                    if paused && !paused_before {with_timeout(Duration::from_millis(500),hid_output(&reports,&conn,Output::ReleaseAll)).await.map_err(|_|"HID pause release timed out")??;}
+                    if paused && !paused_before {with_timeout(Duration::from_millis(500),hid_output(&reports,&conn,Output::ReleaseAll)).await.map_err(|_|"Pause timed out")??;}
                     paused_before=paused;engine.set_paused(paused);
                     if let Some(output)=engine.next_report(Instant::now().as_millis()) {
                         let subscribed=match output {Output::Consumer(_)=>reports.consumer.should_notify(&conn),Output::Mouse(_)=>reports.mouse.should_notify(&conn),_=>reports.keyboard.should_notify(&conn)};
-                        if !subscribed {return Err("Host has not subscribed to this HID report");}
-                        with_timeout(Duration::from_millis(500),hid_output(&reports,&conn,output)).await.map_err(|_|"HID report timed out")??;
+                        if !subscribed {return Err("Waiting for the host to listen");}
+                        with_timeout(Duration::from_millis(500),hid_output(&reports,&conn,output)).await.map_err(|_|"Keystroke timed out")??;
                     }
                     let progress=engine.progress();
                     critical_section::with(|cs|*HID_PROGRESS.borrow_ref_mut(cs)=(progress.percent,engine.keystrokes(),engine.unsupported_chars()));
-                    set_status(&alloc::format!("{} {}% / {} keys",if paused{"paused"}else{name},progress.percent,engine.keystrokes()));
+                    set_status(&alloc::format!("{} {}% {} keys",if paused{"paused"}else{&name},progress.percent,engine.keystrokes()));
                     Timer::after(Duration::from_millis(10)).await;
                 }
                 with_timeout(Duration::from_millis(500),hid_output(&reports,&conn,Output::ReleaseAll)).await.map_err(|_|"HID release timed out")??;
-                set_status(if current(token){"HID payload sent; select Run to repeat"}else{"HID stopped; reports released"});
+                set_status(if current(token){"Sent. Press Start to repeat"}else{"Stopped. Keys released"});
             }
             Timer::after(Duration::from_millis(10)).await;
         }
-        with_timeout(Duration::from_millis(500),hid_output(&reports,&conn,Output::ReleaseAll)).await.map_err(|_|"HID release timed out")??;
+        with_timeout(Duration::from_millis(500),hid_output(&reports,&conn,Output::ReleaseAll)).await.map_err(|_|"Release timed out")??;
         Ok(())
     };
     let result=match select(events,payloads).await {Either::First(result)|Either::Second(result)=>result};
