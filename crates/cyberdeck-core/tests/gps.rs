@@ -1,0 +1,10 @@
+use cyberdeck_core::gps::{Nmea,TrackLog,Fix,geofence_contains};
+fn feed(g:&mut Nmea,body:&str,now:u64){let sum=body.bytes().fold(0,|s,b|s^b);for b in format!("\u{24}{body}*{sum:02X}\r\n").bytes(){g.push(b,now);}}
+#[test]fn rmc_coordinates_and_freshness(){let mut g=Nmea::new();feed(&mut g,"GNRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,,,A",1000);let f=g.fix().unwrap();assert_eq!(f.latitude_e7,481173000);assert_eq!(f.longitude_e7,115166666);assert_eq!(f.utc_date,"230394");assert!(g.fresh_fix(5999).is_some());assert!(g.fresh_fix(7000).is_none());}
+#[test]fn bad_checksum_is_rejected(){let mut g=Nmea::new();for b in b"$GPRMC,123519,A,4807.038,N,01131.000,E,0,0,230394*00\r\n"{g.push(*b,1);}assert!(g.fix().is_none());assert_eq!(g.checksum_errors(),1);}
+#[test]fn void_rmc_clears_lock(){let mut g=Nmea::new();feed(&mut g,"GPRMC,123519,A,4807.038,N,01131.000,E,0,0,230394",1);feed(&mut g,"GPRMC,123520,V,,,,,,,230394",2);assert!(g.fresh_fix(2).is_none());}
+#[test]fn gga_south_west_and_altitude(){let mut g=Nmea::new();feed(&mut g,"GPGGA,123519,3456.000,S,05822.000,W,1,08,0.9,545.4,M,46.9,M,,",20);let f=g.fix().unwrap();assert_eq!(f.latitude_e7,-349333333);assert_eq!(f.longitude_e7,-583666666);assert_eq!(f.satellites,8);assert_eq!(f.altitude_dm,5454);}
+#[test]fn oversized_input_resynchronizes(){let mut g=Nmea::new();g.push(b'$',0);for _ in 0..400{g.push(b'A',0);}feed(&mut g,"GPRMC,123519,A,4807.038,N,01131.000,E,0,0,230394",100);assert!(g.fix().is_some());assert!(g.malformed()>0);}
+#[test]fn impossible_coordinates_rejected(){let mut g=Nmea::new();feed(&mut g,"GPRMC,123519,A,9961.000,N,18100.000,E,0,0,230394",1);assert!(g.fix().is_none());}
+#[test]fn bounded_track_exports_csv(){let mut l=TrackLog::<2>::new();for n in 0..3{l.record(&Fix::default(),n);}assert_eq!(l.len(),2);assert_eq!(l.dropped(),1);assert_eq!(l.csv().lines().count(),3);}
+#[test]fn geofence_checks_position(){let f=Fix{latitude_e7:270000000,longitude_e7:850000000,..Fix::default()};assert!(geofence_contains(&f,270000000,850000000,100));assert!(!geofence_contains(&f,271000000,850000000,100));}

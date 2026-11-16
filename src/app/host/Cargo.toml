@@ -1,0 +1,17 @@
+[package]
+name = "admin12121-ui-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+cyberdeck-core = { path = "../../../crates/cyberdeck-core" }
+
+[[bin]]
+name = "ui-preview"
+path = "preview.rs"

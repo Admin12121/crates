@@ -28,6 +28,7 @@ pub mod board;
 pub mod error;
 pub mod event;
 pub mod hardware;
+pub mod gps;
 pub mod hid;
 pub mod job;
 pub mod net;
@@ -46,4 +47,4 @@ pub use hardware::{DeviceClass, DeviceState, HardwareManifest, PeripheralRegistr
 pub const FIRMWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Name shown in the device UI header.
-pub const DEVICE_NAME: &str = "CyberDeck";
+pub const DEVICE_NAME: &str = "Admin12121";

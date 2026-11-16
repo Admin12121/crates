@@ -101,7 +101,7 @@ pub struct PcapStats {
     pub records: u32,
     /// Bytes for records only (global header excluded).
     pub payload_bytes: u64,
-    /// Frames captured with FCS stripped in whole.
+    /// Frames whose retained payload is shorter than their original length.
     pub truncated: u32,
     /// Frames refused because the file size cap was reached.
     pub dropped: u32,
@@ -169,46 +169,43 @@ impl<S: PcapSink> PcapWriter<S> {
         frame: &[u8],
         radiotap: &Radiotap,
     ) -> Result<(), DeckError> {
-        if self.finished {
-            return Err(DeckError::Internal {
-                reason: "pcap writer already closed",
-            });
-        }
-        let rt = {
-            let mut rt = *radiotap;
-            if self.fcs_included {
-                rt.flags |= RADIOTAP_FLAG_FCS;
-            }
-            rt
-        };
-        let encoded = rt.encode();
-        let orig_len = encoded.len() + frame.len();
-        let incl_frame = &frame[..frame.len().min(self.snaplen as usize)];
-        let incl_len = encoded.len() + incl_frame.len();
-        if orig_len > incl_len {
-            self.stats.truncated = self.stats.truncated.saturating_add(1);
-        }
-        let record_bytes = 16 + incl_len as u64;
-        if self.written + record_bytes > self.max_bytes {
-            self.stats.dropped = self.stats.dropped.saturating_add(1);
-            return Err(DeckError::Storage {
-                reason: "capture size limit reached",
-            });
-        }
+        self.write_frame_with_original(ts, frame, frame.len() as u32, radiotap)
+    }
 
-        let mut header = [0u8; 16];
-        header[0..4].copy_from_slice(&(ts.secs as u32).to_le_bytes());
-        header[4..8].copy_from_slice(&ts.micros.to_le_bytes());
-        header[8..12].copy_from_slice(&(incl_len as u32).to_le_bytes());
-        header[12..16].copy_from_slice(&(orig_len as u32).to_le_bytes());
-
-        self.sink.write_all(&header)?;
-        self.sink.write_all(&encoded)?;
-        self.sink.write_all(incl_frame)?;
-
-        self.written += record_bytes;
-        self.stats.records = self.stats.records.saturating_add(1);
-        self.stats.payload_bytes += incl_len as u64;
+    /// Preserve the on-air length when the callback retained only a frame prefix.
+    /// The sink receives one complete record so pressure can reject it atomically.
+    pub fn write_frame_with_original(
+        &mut self, ts: Timestamp, frame: &[u8], original_frame_len: u32, radiotap: &Radiotap,
+    ) -> Result<(), DeckError> {
+        if self.finished { return Err(DeckError::Internal {reason:"pcap writer already closed"}); }
+        let original_frame_len=original_frame_len.max(frame.len() as u32);
+        let frame_limit=(self.snaplen as usize).saturating_sub(Radiotap::LEN);
+        let incl_frame=&frame[..frame.len().min(frame_limit)];
+        let mut rt=*radiotap;
+        rt.flags &= !RADIOTAP_FLAG_FCS;
+        if self.fcs_included && incl_frame.len()>=4 && incl_frame.len()==original_frame_len as usize {
+            rt.flags |= RADIOTAP_FLAG_FCS;
+        }
+        let encoded=rt.encode();
+        let orig_len=(encoded.len() as u32).saturating_add(original_frame_len);
+        let incl_len=encoded.len()+incl_frame.len();
+        let record_bytes=16+incl_len as u64;
+        if self.written.saturating_add(record_bytes)>self.max_bytes {
+            self.stats.dropped=self.stats.dropped.saturating_add(1);
+            return Err(DeckError::Storage { reason:"capture size limit reached" });
+        }
+        let mut record=Vec::with_capacity(record_bytes as usize);
+        record.extend_from_slice(&(ts.secs as u32).to_le_bytes());
+        record.extend_from_slice(&ts.micros.to_le_bytes());
+        record.extend_from_slice(&(incl_len as u32).to_le_bytes());
+        record.extend_from_slice(&orig_len.to_le_bytes());
+        record.extend_from_slice(&encoded);
+        record.extend_from_slice(incl_frame);
+        self.sink.write_all(&record)?;
+        if orig_len as usize>incl_len { self.stats.truncated=self.stats.truncated.saturating_add(1); }
+        self.written+=record_bytes;
+        self.stats.records=self.stats.records.saturating_add(1);
+        self.stats.payload_bytes+=incl_len as u64;
         Ok(())
     }
 
@@ -342,7 +339,7 @@ mod tests {
         let record = &sink.0[24..];
         let incl = u32::from_le_bytes(record[8..12].try_into().unwrap());
         let orig = u32::from_le_bytes(record[12..16].try_into().unwrap());
-        assert_eq!(incl as usize, 100 + Radiotap::LEN);
+        assert_eq!(incl as usize, 100);
         assert_eq!(orig as usize, 400 + Radiotap::LEN);
         assert_eq!(record.len(), 16 + incl as usize);
     }
@@ -365,5 +362,33 @@ mod tests {
     fn fcs_stripping_is_safe_for_short_frames() {
         assert_eq!(strip_fcs(&[1, 2, 3, 4, 5]), &[1]);
         assert_eq!(strip_fcs(&[1, 2]), &[1, 2]);
+    }
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+    #[test]
+    fn snaplen_limits_complete_record_and_clears_truncated_fcs() {
+        let mut writer = PcapWriter::new(VecSink::default(), 100, true, 10000).unwrap();
+        writer.write_frame_on_channel(Timestamp::from_micros(1234567), &[9; 200], 2412, -44).unwrap();
+        let (sink, _) = writer.finish().unwrap();
+        let included = u32::from_le_bytes(sink.0[32..36].try_into().unwrap());
+        assert!(included <= 100, "record exceeds advertised global snapshot length");
+        assert_eq!(sink.0[56] & RADIOTAP_FLAG_FCS, 0, "truncated prefix cannot contain trailing FCS");
+    }
+    #[test]
+    fn one_record_is_one_atomic_sink_write() {
+        #[derive(Default)]
+        struct RecordSink { writes: Vec<Vec<u8>> }
+        impl PcapSink for RecordSink {
+            fn write_all(&mut self, bytes: &[u8]) -> Result<(), DeckError> {
+                self.writes.push(bytes.to_vec()); Ok(())
+            }
+        }
+        let mut writer=PcapWriter::new(RecordSink::default(), 512, false,10000).unwrap();
+        writer.write_frame_on_channel(Timestamp::from_micros(8), &[1;40],2412,-30).unwrap();
+        let (sink,_)=writer.finish().unwrap();
+        assert_eq!(sink.writes.len(), 2, "header and complete record must be atomic");
     }
 }

@@ -751,3 +751,25 @@ mod tests {
         assert!(store.is_empty());
     }
 }
+
+#[cfg(test)]
+mod export_review_regressions {
+    use super::*;
+    #[test]
+    fn malformed_key_data_and_short_declared_body_are_rejected() {
+        let mut m1=build_eapol_key(DESCRIPTOR_RSN,KEY_INFO_ACK,1,&[1;32],&[]);
+        m1[97..99].copy_from_slice(&20u16.to_be_bytes());assert!(EapolKey::parse(&m1).is_none());
+        m1[97..99].copy_from_slice(&0u16.to_be_bytes());m1[2..4].copy_from_slice(&1u16.to_be_bytes());assert!(EapolKey::parse(&m1).is_none());
+    }
+    #[test]
+    fn late_m4_does_not_replace_m2_mic_and_export_zeroes_mic() {
+        let mut store:HandshakeStore<2>=HandshakeStore::new();let ap=MacAddr([1;6]);let client=MacAddr([2;6]);
+        let m1=build_eapol_key(DESCRIPTOR_RSN,KEY_INFO_ACK,1,&[1;32],&[]);
+        let mut m2=build_eapol_key(DESCRIPTOR_RSN,KEY_INFO_MIC,1,&[2;32],&[]);m2[81..97].fill(0xaa);
+        let mut m4=build_eapol_key(DESCRIPTOR_RSN,KEY_INFO_MIC,2,&[0;32],&[]);m4[81..97].fill(0xbb);
+        store.on_eapol(&m1,ap,client,Some(b"Lab"),1,1);store.on_eapol(&m2,ap,client,Some(b"Lab"),1,2);store.on_eapol(&m4,ap,client,Some(b"Lab"),1,3);
+        let h=store.get(ap,client).unwrap();assert_eq!(h.mic,[0xaa;16]);
+        let line=h.hc22000().unwrap();let data=line.split('*').nth(7).unwrap();
+        assert_eq!(&data[162..194],"00000000000000000000000000000000");
+    }
+}

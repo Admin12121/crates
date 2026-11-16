@@ -4,6 +4,9 @@
 //! semantics around it: counters that must match the file, filters used while
 //! capturing, per-frame summaries for the on-device browser, and export helpers.
 
+pub mod storage;
+pub mod passive;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;

@@ -821,3 +821,16 @@ mod tests {
         assert_eq!(Ssid::new(&[b'x'; 40]).len(), MAX_SSID);
     }
 }
+
+#[cfg(test)]
+mod review_regression {
+    use super::*;
+    #[test]
+    fn cleartext_eapol_is_observed_as_eapol() {
+        let mut frame=alloc::vec![0x08,1,0,0];frame.extend_from_slice(&[1;6]);frame.extend_from_slice(&[2;6]);frame.extend_from_slice(&[3;6]);frame.extend_from_slice(&[0;2]);
+        frame.extend_from_slice(&[0xaa,0xaa,3,0,0,0,0x88,0x8e,2,3]);
+        let mut engine:ScanEngine<2,2>=ScanEngine::new();
+        assert!(matches!(engine.on_frame(&frame,-40,1,1),Observation::Eapol {..}));
+        assert_eq!(engine.eapol,1);
+    }
+}

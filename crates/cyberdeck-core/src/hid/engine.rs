@@ -46,6 +46,7 @@ pub struct HidEngine {
     text_index: usize,
     /// A key was pressed and its release report is due next tick.
     release_pending: bool,
+    release_kind: u8,
     release_modifiers: u8,
     wait_until_ms: u64,
     key_delay_ms: u16,
@@ -94,6 +95,7 @@ impl HidEngine {
             pc: 0,
             text_index: 0,
             release_pending: false,
+            release_kind: 1,
             release_modifiers: 0,
             wait_until_ms: 0,
             key_delay_ms: script.key_delay_ms.max(1),
@@ -169,9 +171,6 @@ impl HidEngine {
     /// Returns `None` while waiting for a delay or when the script is done. Call it
     /// repeatedly (the firmware drives it from the 10 ms input tick).
     pub fn next_report(&mut self, now_ms: u64) -> Option<Output> {
-        if self.paused {
-            return None;
-        }
         if self.stopped && !self.release_all_sent {
             self.stopped = true;
             self.release_all_sent = true;
@@ -179,7 +178,7 @@ impl HidEngine {
             self.finished = true;
             return Some(Output::ReleaseAll);
         }
-        if self.finished {
+        if self.paused || self.finished {
             return None;
         }
         if now_ms < self.wait_until_ms {
@@ -194,10 +193,12 @@ impl HidEngine {
             // Consume any delay that follows the key now, so "type, wait 100 ms,
             // type" lands 100 ms after the release instead of after the next poll.
             self.absorb_idle_commands(now_ms);
-            return Some(Output::Keyboard(KeyboardReport {
-                modifiers,
-                keycodes: [0; 6],
-            }));
+            let kind = core::mem::replace(&mut self.release_kind, 1);
+            return Some(match kind {
+                2 => Output::Consumer(ConsumerReport { usage: 0 }),
+                3 => Output::Mouse(MouseReport { buttons: 0, dx: 0, dy: 0, wheel: 0 }),
+                _ => Output::Keyboard(KeyboardReport { modifiers, keycodes: [0; 6] }),
+            });
         }
 
         // Bounded loop: a run of zero-report commands (delays/unsupported chars)
@@ -306,6 +307,7 @@ impl HidEngine {
                     }));
                 }
                 Command::Media(usage) => {
+                    self.release_kind = 2;
                     self.pc += 1;
                     self.keystrokes = self.keystrokes.saturating_add(1);
                     self.release_pending = true;
@@ -322,6 +324,7 @@ impl HidEngine {
                     }));
                 }
                 Command::MouseClick(button) => {
+                    self.release_kind = 3;
                     self.pc += 1;
                     self.release_pending = true;
                     self.release_modifiers = 0;
@@ -392,7 +395,7 @@ pub const BUILTIN_SCRIPTS: &[(&str, &str)] = &[
         "hid-test.txt",
         "REM Types a HID self-test line into any open text field\n\
          DELAY 800\n\
-         STRING CyberDeck HID self-test\n\
+         STRING Admin12121 HID self-test\n\
          ENTER\n\
          STRING Layout: OK  Keys: OK\n\
          ENTER\n",
@@ -406,8 +409,12 @@ pub const BUILTIN_SCRIPTS: &[(&str, &str)] = &[
          STRING notepad\n\
          ENTER\n\
          DELAY 900\n\
-         STRING CyberDeck payload ran successfully.\n\
+         STRING Admin12121 payload ran successfully.\n\
          ENTER\n",
+    ),
+    (
+        "media-mouse.txt",
+        "REM Explicit volume and pointer test\nDELAY 800\nMUTE\nDELAY 200\nMUTE\nMOUSE_MOVE 20 0\nMOUSE_MOVE -20 0\n",
     ),
     (
         "presenter.txt",
@@ -636,4 +643,23 @@ mod tests {
         assert!(validate_payload_name(&"x".repeat(65)).is_err());
         assert!(validate_payload_name("bad name.txt").is_err());
     }
+    #[test]
+    fn stop_while_paused_still_releases_every_held_report() {
+        let mut engine = engine("MOUSE_CLICK left");
+        assert!(matches!(engine.next_report(0), Some(Output::Mouse(_))));
+        engine.set_paused(true);
+        engine.stop();
+        assert_eq!(engine.next_report(1), Some(Output::ReleaseAll));
+        assert!(engine.is_finished());
+    }
+
+    #[test]
+    fn consumer_and_mouse_release_their_own_report_type() {
+        let mut engine = engine("MUTE\nMOUSE_CLICK left");
+        assert!(matches!(engine.next_report(0), Some(Output::Consumer(_))));
+        assert_eq!(engine.next_report(20), Some(Output::Consumer(ConsumerReport { usage: 0 })));
+        assert!(matches!(engine.next_report(40), Some(Output::Mouse(_))));
+        assert_eq!(engine.next_report(60), Some(Output::Mouse(MouseReport { buttons: 0, dx: 0, dy: 0, wheel: 0 })));
+    }
+
 }

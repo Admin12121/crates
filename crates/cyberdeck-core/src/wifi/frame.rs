@@ -978,3 +978,13 @@ mod tests {
         assert_eq!(classify_security(header.body, true).security, Security::Wep);
     }
 }
+
+#[cfg(test)]
+mod wps_review_regression {
+    use super::*;
+    #[test]
+    fn wps_state_two_means_configured() {
+        let ie=[221,9,0,0x50,0xf2,4,0x10,0x44,0,1,2];
+        assert!(parse_wps(&ie).unwrap().configured);
+    }
+}

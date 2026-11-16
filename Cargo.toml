@@ -57,6 +57,7 @@ smoltcp = { version = "0.14.0", default-features = false, features = [
   "socket-udp",
 ] }
 trouble-host = { version = "0.7.0", features = [
+  "scan",
   "central",
   "gatt",
   "peripheral",
@@ -66,7 +67,7 @@ critical-section = "1.2.0"
 static_cell      = "2.1.1"
 embedded-hal     = "1.0"
 embedded-sdmmc   = "0.9"
-embassy-usb      = { version = "0.5", features = ["max-handler-count-2", "max-interface-count-3"] }
+embassy-usb      = { version = "0.5", features = ["max-handler-count-3", "max-interface-count-3"] }
 embassy-futures  = "0.1"
 
 [workspace]

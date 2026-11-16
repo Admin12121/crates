@@ -6,6 +6,7 @@
 
 pub mod ducky;
 pub mod engine;
+pub mod session;
 
 /// HID modifier bits (boot keyboard report byte 0).
 pub mod modifier {
