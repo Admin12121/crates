@@ -18,6 +18,7 @@ impl<T> SessionQueue<T> {
         self.pending = None;
     }
     pub fn take(&mut self) -> Option<(u32, T)> { self.pending.take() }
+    pub fn has_pending(&self) -> bool { self.pending.is_some() }
     pub fn is_current(&self, token: u32) -> bool { self.generation == token }
 }
 impl<T> Default for SessionQueue<T> { fn default() -> Self { Self::new() } }

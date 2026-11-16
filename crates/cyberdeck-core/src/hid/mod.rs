@@ -318,8 +318,8 @@ impl UsbProfile {
     pub const HID_COMBO: Self = Self {
         vendor_id: 0x1209, // pid.codes open-source VID
         product_id: 0x0001,
-        manufacturer: "CyberDeck",
-        product: "CyberDeck HID",
+        manufacturer: "Admin12121",
+        product: "Admin12121 HID",
         serial: "CD-HID-0001",
         keyboard: true,
         mouse: true,
@@ -330,7 +330,7 @@ impl UsbProfile {
     /// Keyboard only: the lowest-risk profile for host compatibility tests.
     pub const KEYBOARD_ONLY: Self = Self {
         product_id: 0x0002,
-        product: "CyberDeck Keyboard",
+        product: "Admin12121 Keyboard",
         mouse: false,
         consumer: false,
         ..Self::HID_COMBO
@@ -339,7 +339,7 @@ impl UsbProfile {
     /// Keyboard + CDC (console/streaming) composite.
     pub const KEYBOARD_CDC: Self = Self {
         product_id: 0x0003,
-        product: "CyberDeck Keyboard + Console",
+        product: "Admin12121 Keyboard + Console",
         mouse: false,
         consumer: false,
         cdc: true,

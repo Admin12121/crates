@@ -163,9 +163,10 @@ static COMMAND: Mutex<RefCell<SessionQueue<UsbCommand>>> = Mutex::new(RefCell::n
 static PAUSED: AtomicBool = AtomicBool::new(false);
 static CONFIGURED: AtomicBool = AtomicBool::new(false);
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum UsbCommand {
     RunDemo,
+    RunText { name: String, source: String, layout: Layout },
     RunPayload { index: u8, layout: Layout },
     Pause,
     Resume,
@@ -230,9 +231,18 @@ async fn hid_loop<'d,D:Driver<'d>>(mut writer:HidWriter<'d,D,9>)->! {
             if !CONFIGURED.load(Ordering::Acquire) {
                 publish("Connect USB host, then Run",0,0,0);
             } else if current(token) {
-                let(index,layout)=match command { UsbCommand::RunPayload{index,layout}=>(index,layout),_=>(0,Layout::Us) };
-                let Some((name,body))=BUILTIN_SCRIPTS.get(usize::from(index)) else { publish("Unknown payload",0,0,0); continue; };
-                match ducky::parse(name,body) {
+                let (name,body,layout)=match command {
+                    UsbCommand::RunText{name,source,layout} => {
+                        if name.len()>64 || source.len()>8192 || cyberdeck_core::hid::engine::validate_payload_name(&name).is_err() {publish("Payload exceeds bounds or invalid name",0,0,0);continue;}
+                        (name,source,layout)
+                    }
+                    other => {
+                        let(index,layout)=match other {UsbCommand::RunPayload{index,layout}=>(index,layout),_=>(0,Layout::Us)};
+                        let Some((name,body))=BUILTIN_SCRIPTS.get(usize::from(index)) else {publish("Unknown payload",0,0,0);continue;};
+                        (String::from(*name),String::from(*body),layout)
+                    }
+                };
+                match ducky::parse(&name,&body) {
                     Err(error)=>publish(&error.describe(),0,0,0),
                     Ok(script)=>{
                         PAUSED.store(false,Ordering::Release);
@@ -255,7 +265,7 @@ async fn hid_loop<'d,D:Driver<'d>>(mut writer:HidWriter<'d,D,9>)->! {
                                 }
                             }
                             let p=engine.progress();
-                            publish(if paused {"paused"} else {name},p.percent,engine.keystrokes(),engine.unsupported_chars());
+                            publish(if paused {"paused"} else {name.as_str()},p.percent,engine.keystrokes(),engine.unsupported_chars());
                             if engine.is_finished() {break;}
                             Timer::after(Duration::from_millis(POLL_MS)).await;
                         }

@@ -6,6 +6,8 @@
 //! initialisation failure instead of being used blindly.
 
 use cyberdeck_core::rf::nrf24::*;
+use alloc::rc::Rc;
+use core::cell::RefCell;
 use embedded_hal::spi::SpiBus;
 use esp_hal::Blocking;
 use esp_hal::gpio::{Level, Output, OutputConfig};
@@ -31,7 +33,7 @@ impl Nrf24Error {
 
 /// One nRF24L01+ module.
 pub struct Nrf24<'d> {
-    spi: Spi<'d, Blocking>,
+    spi: Rc<RefCell<Spi<'d, Blocking>>>,
     csn: Output<'d>,
     ce: Output<'d>,
     channel: u8,
@@ -44,6 +46,10 @@ impl<'d> Nrf24<'d> {
         ce: Output<'d>,
         rate: DataRate,
     ) -> Result<Self, Nrf24Error> {
+        Self::from_shared(Rc::new(RefCell::new(spi)), csn, ce, rate)
+    }
+
+    pub fn from_shared(spi: Rc<RefCell<Spi<'d, Blocking>>>, csn: Output<'d>, ce: Output<'d>, rate: DataRate) -> Result<Self, Nrf24Error> {
         let mut radio = Self {
             spi,
             csn,
@@ -87,7 +93,7 @@ impl<'d> Nrf24<'d> {
         self.csn.set_low();
         let mut read = [0u8; 1];
         let result =
-            SpiBus::transfer(&mut self.spi, &mut read, &[command]).map_err(|_| Nrf24Error::Bus);
+            SpiBus::transfer(&mut *self.spi.borrow_mut(), &mut read, &[command]).map_err(|_| Nrf24Error::Bus);
         self.csn.set_high();
         result
     }
@@ -96,7 +102,7 @@ impl<'d> Nrf24<'d> {
     fn read_raw(&mut self, command: u8) -> Result<u8, Nrf24Error> {
         self.csn.set_low();
         let mut read = [0u8; 2];
-        let result = SpiBus::transfer(&mut self.spi, &mut read, &[command, 0x00])
+        let result = SpiBus::transfer(&mut *self.spi.borrow_mut(), &mut read, &[command, 0x00])
             .map_err(|_| Nrf24Error::Bus);
         self.csn.set_high();
         result.map(|()| read[1])
@@ -110,7 +116,7 @@ impl<'d> Nrf24<'d> {
         self.csn.set_low();
         let mut read = [0u8; 2];
         let result = SpiBus::transfer(
-            &mut self.spi,
+            &mut *self.spi.borrow_mut(),
             &mut read,
             &[CMD_W_REGISTER | (register & 0x1F), value],
         )
@@ -151,7 +157,7 @@ impl<'d> Nrf24<'d> {
         if pipe == STATUS_RX_P_NO_EMPTY {
             return Ok(None);
         }
-        let width = usize::from(self.read_raw(CMD_R_RX_PL_WID)?).min(buffer.len());
+        let width = usize::from(self.read_register(REG_RX_PW_P0 + pipe)?).min(buffer.len());
         if width == 0 {
             return Ok(None);
         }
@@ -160,7 +166,7 @@ impl<'d> Nrf24<'d> {
         write[0] = CMD_R_RX_PAYLOAD;
         let mut read = [0u8; MAX_PAYLOAD as usize + 1];
         let result =
-            SpiBus::transfer(&mut self.spi, &mut read, &write).map_err(|_| Nrf24Error::Bus);
+            SpiBus::transfer(&mut *self.spi.borrow_mut(), &mut read, &write).map_err(|_| Nrf24Error::Bus);
         self.csn.set_high();
         result?;
         buffer[..width].copy_from_slice(&read[1..1 + width]);
@@ -177,6 +183,22 @@ impl<'d> Nrf24<'d> {
         }
     }
 
+    /// Configure a known lab receive profile. Address bytes use nRF register order.
+    pub fn configure(&mut self, rate: DataRate, payload_len: u8, address: [u8; 5]) -> Result<(), Nrf24Error> {
+        self.ce.set_low();
+        self.write_register(REG_RF_SETUP, rate.rf_setup_bits())?;
+        self.write_register(REG_RX_PW_P0, payload_len.clamp(1, MAX_PAYLOAD))?;
+        self.csn.set_low();
+        let mut command = [0u8; 6];
+        command[0] = CMD_W_REGISTER | REG_RX_ADDR_P0;
+        command[1..].copy_from_slice(&address);
+        let mut response = [0u8; 6];
+        let result = SpiBus::transfer(&mut *self.spi.borrow_mut(), &mut response, &command).map_err(|_| Nrf24Error::Bus);
+        self.csn.set_high();
+        result?;
+        self.command(CMD_FLUSH_RX)?;
+        Ok(())
+    }
     pub fn power_down(&mut self) -> Result<(), Nrf24Error> {
         self.ce.set_low();
         self.write_register(REG_CONFIG, CONFIG_EN_CRC | CONFIG_CRCO)?;

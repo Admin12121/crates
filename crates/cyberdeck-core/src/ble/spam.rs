@@ -93,7 +93,7 @@ const FASTPAIR_MODELS: &[[u8; 3]] = &[
 ];
 /// Swift Pair display names.
 const SWIFT_PAIR_NAMES: &[&[u8]] = &[
-    b"CyberDeck Mouse",
+    b"Admin12121 Mouse",
     b"BT Keyboard",
     b"Wireless Headset",
     b"Surface Pen",

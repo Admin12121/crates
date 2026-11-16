@@ -63,7 +63,7 @@ mod tests {
     fn open_legacy(group:usize)->App {
         let mut app=App::new(registry());
         for _ in 0..group {app.handle(Button::Down);}
-        app.handle(Button::Select); app.handle(Button::Select);
+        app.handle(Button::Select); app.handle(Button::Select); app.handle(Button::Select);
         app
     }
     #[test]
@@ -105,4 +105,109 @@ mod tests {
             assert!(x>=0 && y>=0 && x+6*i16::from(scale)<=128 && y+7*i16::from(scale)<=160,"out of bounds glyph at {x},{y} x{scale}");
         }
     }
+    #[test]
+    fn setup_run_stop_results_and_saved_session_navigation() {
+        let mut app=App::new(registry());
+        assert_eq!(app.handle(Button::Select),Action::None);
+        assert_eq!(app.handle(Button::Select),Action::None,"opening setup must not start a driver");
+        let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);
+        assert!(canvas.text.contains("SETUP"));
+        assert_eq!(app.handle(Button::Select),Action::Start(app::Tool::WifiScan));
+        let mut live=Live::default();live.wifi_frames=42;app.set_live(live);
+        assert_eq!(app.handle(Button::Back),Action::Stop);
+        app.set_live(Live::default());
+        let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);
+        assert!(canvas.text.contains("RESULTS"));assert!(canvas.text.contains("42 frames"),"stopping preserves the result even when driver counters reset");
+        app.handle(Button::Home);app.handle(Button::Select);app.handle(Button::Select);app.handle(Button::Up);app.handle(Button::Select);
+        let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);assert!(canvas.text.contains("42 frames"));
+    }
+    #[test]
+    fn all_seven_modules_are_reachable_without_developer_badges() {
+        for index in 0..8 {
+            let mut app=App::new(registry());for _ in 0..index{app.handle(Button::Down);}
+            app.handle(Button::Select);
+            let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);
+            let expected=["Wi-Fi","Packet","Bluetooth","USB / HID","Radio","GPS","Network","Diagnostics"][index];
+            assert!(canvas.text.contains(expected),"missing module {expected}");
+            for clutter in ["G01","G02","BUILT","NO HW","CYBERDECK"] {assert!(!canvas.text.contains(clutter));}
+        }
+    }
+    #[test]
+    fn usb_payload_selection_layout_pause_resume_and_stop() {
+        let mut app=App::new(registry());app.set_payloads(&["HID test","Text editor","Presenter"]);
+        for _ in 0..3 {app.handle(Button::Down);}app.handle(Button::Select);app.handle(Button::Select);
+        app.handle(Button::Down);app.handle(Button::Select);assert_eq!(app.settings().payload,1);
+        app.handle(Button::Down);app.handle(Button::Select);assert_eq!(app.settings().layout,app::KeyboardLayout::Uk);
+        app.handle(Button::Up);app.handle(Button::Up);
+        assert_eq!(app.handle(Button::Select),Action::Start(app::Tool::HidIntro));
+        assert_eq!(app.handle(Button::Select),Action::Pause(true));
+        assert_eq!(app.handle(Button::Select),Action::Pause(false));
+        assert_eq!(app.handle(Button::Back),Action::Stop);
+    }
+    #[test]
+    fn unavailable_tools_explain_reason_and_never_dispatch_fake_work() {
+        let mut app=App::new(cyberdeck_core::PeripheralRegistry::new());
+        app.handle(Button::Select);assert_eq!(app.handle(Button::Select),Action::None);
+        let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);
+        assert!(canvas.text.contains("Wi-Fi radio"));
+        let mut app=App::new(registry());app.set_tool_unavailable(app::Tool::WifiScan,"Disabled in simulator");
+        app.handle(Button::Select);assert_eq!(app.handle(Button::Select),Action::None);
+        let mut canvas=TestCanvas::new(128,160);app.render(&mut canvas);assert!(canvas.text.contains("Disabled"));
+    }
+    #[test]
+    fn ssid_and_password_editor_supply_real_credentials() {
+        let mut app=App::new(registry());app.set_tool_available(app::Tool::NetInfo);
+        for _ in 0..6 {app.handle(Button::Down);}app.handle(Button::Select);app.handle(Button::Select);
+        app.handle(Button::Down);app.handle(Button::Down);app.handle(Button::Select);
+        app.handle(Button::Up);app.handle(Button::Select);app.handle(Button::Back);
+        app.handle(Button::Down);app.handle(Button::Select);app.handle(Button::Select);app.handle(Button::Back);
+        assert_eq!(app.network_credentials(),("b".into(),"a".into()));
+    }
+
+    #[test]
+    fn long_wrapped_content_is_reachable_by_scrolling() {
+        let mut app=App::new(registry());app.handle(Button::Select);app.handle(Button::Down);app.handle(Button::Select);app.handle(Button::Select);
+        let mut live=Live::default();live.packet_lines=vec![format!("Header {} END_MARKER","X".repeat(240))];app.set_live(live);
+        let mut canvas=TestCanvas::new(128,160);app.render(&mut canvas);
+        for _ in 0..100 {app.handle(Button::Down);}
+        let mut canvas=TestCanvas::new(128,160);app.render(&mut canvas);
+        assert!(canvas.text.contains("END_MARKER"),"scroll must reach long wrapped content, not truncate a long word");
+    }
+    #[test]
+    fn setup_and_live_content_fit_both_panel_sizes() {
+        for (width,height) in [(128,160),(240,320)] {
+            for group in 0..7 {
+                let mut app=App::new(registry());
+                for tool in [app::Tool::GpsStatus,app::Tool::NetInfo]{app.set_tool_available(tool);}
+                for _ in 0..group{app.handle(Button::Down);}
+                for _ in 0..3 {
+                    app.handle(Button::Select);
+                    let mut canvas=TestCanvas::new(width,height);app.render(&mut canvas);
+                    for (x,y,scale) in canvas.glyphs {
+                        assert!(x>=0&&y>=0&&x+6*i16::from(scale)<=width as i16&&y+7*i16::from(scale)<=height as i16,"group {group} glyph outside {width}x{height}");
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn network_host_and_rf_settings_are_bounded() {
+        let mut app=App::new(registry());app.set_tool_available(app::Tool::NetProbe);
+        for _ in 0..6{app.handle(Button::Down);}app.handle(Button::Select);app.handle(Button::Down);app.handle(Button::Down);app.handle(Button::Select);app.handle(Button::Down);
+        for _ in 0..600{app.handle(Button::Select);assert!((1..=254).contains(&app.settings().target));}
+        app.handle(Button::Home);app.handle(Button::Up);app.handle(Button::Up);app.handle(Button::Select);app.handle(Button::Down);app.handle(Button::Select);app.handle(Button::Down);
+        for _ in 0..300{app.handle(Button::Select);assert!(app.settings().channel<=125);}
+        app.handle(Button::Down);
+        for _ in 0..10{app.handle(Button::Select);assert!(app.settings().rf_rate<=2);}
+        app.handle(Button::Down);
+        for _ in 0..70{app.handle(Button::Select);assert!((1..=32).contains(&app.settings().rf_payload_len));}
+    }
+
+    #[test]
+    fn wrapped_long_word_after_prefix_stays_within_width() {
+        let lines=cyberdeck_core::ui::wrap("short ABCDEFGHIJKLMNOPQRSTUVWXYZ tail",10);
+        assert!(lines.iter().all(|line|line.chars().count()<=10),"every wrapped line must fit: {lines:?}");
+        assert_eq!(lines.join("").replace(' ',""),"shortABCDEFGHIJKLMNOPQRSTUVWXYZtail");
+    }
+
 }

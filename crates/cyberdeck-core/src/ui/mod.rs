@@ -157,26 +157,19 @@ pub fn wrap(text: &str, max_chars: usize) -> Vec<String> {
         }
         let mut current = String::new();
         for word in paragraph.split(' ') {
-            if current.is_empty() {
-                if word.chars().count() <= max_chars {
-                    current.push_str(word);
-                } else {
-                    // Hard-break a word that cannot fit.
-                    let mut chunk = String::new();
-                    for ch in word.chars() {
-                        if chunk.chars().count() == max_chars {
-                            lines.push(core::mem::take(&mut chunk));
-                        }
-                        chunk.push(ch);
-                    }
-                    current = chunk;
-                }
-            } else if current.chars().count() + 1 + word.chars().count() <= max_chars {
+            if !current.is_empty() && current.chars().count() + 1 + word.chars().count() <= max_chars {
                 current.push(' ');
                 current.push_str(word);
-            } else {
+                continue;
+            }
+            if !current.is_empty() {
                 lines.push(core::mem::take(&mut current));
-                current.push_str(word);
+            }
+            for ch in word.chars() {
+                if current.chars().count() == max_chars {
+                    lines.push(core::mem::take(&mut current));
+                }
+                current.push(ch);
             }
         }
         if !current.is_empty() {
@@ -185,7 +178,6 @@ pub fn wrap(text: &str, max_chars: usize) -> Vec<String> {
     }
     lines
 }
-
 /// Truncate with an ellipsis to fit `max_chars`.
 pub fn ellipsize(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {

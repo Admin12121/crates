@@ -103,7 +103,7 @@ impl<'a> EapolKey<'a> {
             return None;
         }
         let body_len = usize::from(read_u16_be(data, 2)?);
-        if body_len + 4 > data.len() {
+        if body_len < MIN_EAPOL_KEY_LEN - 4 || body_len + 4 > data.len() || !matches!(data[4], DESCRIPTOR_RSN | DESCRIPTOR_WPA) {
             return None;
         }
         let key_info = read_u16_be(data, 5)?;
@@ -116,9 +116,8 @@ impl<'a> EapolKey<'a> {
         let mut mic = [0u8; 16];
         mic.copy_from_slice(&data[MIC_OFFSET..MIC_OFFSET + 16]);
         let key_data_len = usize::from(read_u16_be(data, KEY_DATA_LEN_OFFSET)?);
-        let key_data = data
-            .get(MIN_EAPOL_KEY_LEN..MIN_EAPOL_KEY_LEN + key_data_len)
-            .unwrap_or(&[]);
+        if MIN_EAPOL_KEY_LEN + key_data_len > body_len + 4 { return None; }
+        let key_data = data.get(MIN_EAPOL_KEY_LEN..MIN_EAPOL_KEY_LEN + key_data_len)?;
 
         let has_mic = key_info & KEY_INFO_MIC != 0;
         let ack = key_info & KEY_INFO_ACK != 0;
@@ -323,6 +322,9 @@ impl Handshake {
         }
         let has_m2 = self.messages & HandshakeMessage::Message2.bit() != 0;
         let pair = if has_m2 { "00" } else { "01" };
+        if self.quality() != HandshakeQuality::Complete { return None; }
+        let mut eapol=self.eapol.clone();
+        eapol.get_mut(MIC_OFFSET..MIC_OFFSET+16)?.fill(0);
         Some(alloc::format!(
             "WPA*02*{}*{}*{}*{}*{}*{}*{}",
             hex_encode(&self.mic),
@@ -330,7 +332,7 @@ impl Handshake {
             hex_encode(self.client.as_bytes()),
             hex_encode(self.ssid.as_bytes()),
             hex_encode(&self.anonce),
-            hex_encode(&self.eapol),
+            hex_encode(&eapol),
             pair
         ))
     }
@@ -501,11 +503,18 @@ impl<const N: usize> HandshakeStore<N> {
                 }
             }
             HandshakeMessage::Message4 => {
-                record.mic = key.mic;
+                if record.eapol.is_empty() { record.mic = key.mic; }
             }
             HandshakeMessage::Unknown => {}
         }
         Some(idx)
+    }
+
+    pub fn note_ssid(&mut self, ap: MacAddr, ssid: &[u8]) {
+        if ssid.is_empty() {return}
+        for record in self.entries.iter_mut().flatten() {
+            if record.ap==ap && record.ssid.is_hidden() {record.ssid=Ssid::new(ssid);}
+        }
     }
 
     pub fn clear(&mut self) {

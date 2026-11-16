@@ -339,7 +339,7 @@ pub fn parse_wps(body: &[u8]) -> Option<WpsInfo> {
         let value = &rest[4..4 + len];
         match attr_type {
             0x104A if !value.is_empty() => info.version = value[0],
-            0x1044 if !value.is_empty() => info.configured = value[0] & 0x01 != 0,
+            0x1044 if !value.is_empty() => info.configured = value[0] == 2,
             0x1041 if !value.is_empty() => info.selected_registrar = value[0] & 0x01 != 0,
             0x103B if !value.is_empty() => info.response_type = value[0],
             _ => {}
@@ -926,7 +926,7 @@ mod tests {
             &[
                 0x00, 0x50, 0xF2, 0x04, // OUI + type 4
                 0x10, 0x4A, 0x00, 0x01, 0x10, // version 1.0
-                0x10, 0x44, 0x00, 0x01, 0x01, // configured
+                0x10, 0x44, 0x00, 0x01, 0x02, // configured
                 0x10, 0x3B, 0x00, 0x01, 0x02, // response type AP
             ],
         );

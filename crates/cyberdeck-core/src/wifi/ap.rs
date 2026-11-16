@@ -532,7 +532,7 @@ impl<const A: usize, const S: usize> ScanEngine<A, S> {
                 } else {
                     (header.addr2, header.addr3)
                 };
-                if header.fc.protected {
+                if !header.fc.protected {
                     // EAPOL frames are the interesting ones: they are sent
                     // unprotected with the EAPOL ethertype 0x888E.
                     if is_eapol_frame(header.body) {

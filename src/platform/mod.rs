@@ -6,6 +6,8 @@
 //! peripheral registry instead of unwrapping.
 
 pub mod battery;
+pub mod gps;
+pub mod network;
 pub mod ble;
 pub mod display;
 pub mod export;

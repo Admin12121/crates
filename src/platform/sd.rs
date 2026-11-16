@@ -1,256 +1,180 @@
-//! microSD storage actor: mounts the card once and serialises file writes.
-//!
-//! Formatting and export logic lives in [`super::export`]; this module only owns
-//! the bus and the FAT volume. Jobs cross the actor boundary as owned buffers so
-//! the UI never blocks on SPI and no long critical sections are needed.
-
-use alloc::collections::VecDeque;
-use alloc::string::String;
-use alloc::vec::Vec;
+//! Bounded microSD actor. Accepted writes are queued; only completion confirms durability.
+use alloc::{collections::VecDeque,rc::Rc,string::String,vec::Vec};
 use core::cell::RefCell;
-
 use critical_section::Mutex;
-use embedded_hal::spi::{ErrorType, Operation, SpiBus, SpiDevice};
-use embedded_sdmmc::{Mode, SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
-use esp_hal::Blocking;
-use esp_hal::delay::Delay;
-use esp_hal::gpio::Output;
-use esp_hal::spi::Error as SpiError;
-use esp_hal::spi::master::Spi;
+use embedded_hal::spi::{ErrorType,Operation,SpiBus,SpiDevice};
+use embedded_sdmmc::{Mode,SdCard,TimeSource,Timestamp,VolumeIdx,VolumeManager};
+use esp_hal::{Blocking,delay::Delay,gpio::Output,spi::{Error as SpiError,master::Spi}};
+use cyberdeck_core::packet::storage::{file_name,valid_file_name,pcap_snaplen,pcap_record_size};
 
-const QUEUE_DEPTH: usize = 8;
-
-/// SPI bus with its own chip-select, shaped as an `embedded-hal` `SpiDevice`.
-pub struct SdBus<'d> {
-    spi: Spi<'d, Blocking>,
-    cs: Output<'d>,
+const QUEUE_DEPTH:usize=8;
+const QUEUE_BYTES:usize=24*1024;
+const MAX_JOB_BYTES:usize=8192;
+const MAX_FILES:usize=32;
+pub struct SdBus<'d>{spi:Rc<RefCell<Spi<'d,Blocking>>>,cs:Output<'d>}
+impl<'d>SdBus<'d>{
+    pub fn new(spi:Spi<'d,Blocking>,cs:Output<'d>)->Self{Self::from_shared(Rc::new(RefCell::new(spi)),cs)}
+    pub fn from_shared(spi:Rc<RefCell<Spi<'d,Blocking>>>,cs:Output<'d>)->Self{Self{spi,cs}}
 }
-
-impl<'d> SdBus<'d> {
-    pub fn new(spi: Spi<'d, Blocking>, cs: Output<'d>) -> Self {
-        Self { spi, cs }
-    }
-}
-
-impl ErrorType for SdBus<'_> {
-    type Error = SpiError;
-}
-
-impl SpiDevice<u8> for SdBus<'_> {
-    fn transaction(&mut self, operations: &mut [Operation<'_, u8>]) -> Result<(), SpiError> {
-        self.cs.set_low();
-        let result = operations
-            .iter_mut()
-            .try_for_each(|operation| match operation {
-                Operation::Read(buffer) => self.spi.read(buffer),
-                Operation::Write(buffer) => self.spi.write(buffer),
-                Operation::TransferInPlace(buffer) => self.spi.transfer_in_place(buffer),
-                _ => Ok(()),
-            });
-        self.cs.set_high();
-        result
-    }
-}
-
-/// No RTC on the board: FAT timestamps are fixed until time sync exists.
-struct FixedClock;
-
-impl TimeSource for FixedClock {
-    fn get_timestamp(&self) -> Timestamp {
-        Timestamp {
-            year_since_1970: 56,
-            zero_indexed_month: 10,
-            zero_indexed_day: 15,
-            hours: 0,
-            minutes: 0,
-            seconds: 0,
-        }
-    }
-}
-
-struct StorageState {
-    mounted: bool,
-    status: String,
-    files: u32,
-    bytes: u64,
-}
-
-impl StorageState {
-    const fn new() -> Self {
-        Self {
-            mounted: false,
-            status: String::new(),
-            files: 0,
-            bytes: 0,
-        }
-    }
-}
-
-/// One queued file write.
-pub struct Job {
-    pub name: String,
-    pub append: bool,
-    pub bytes: Vec<u8>,
-}
-
-static STATE: Mutex<RefCell<StorageState>> = Mutex::new(RefCell::new(StorageState::new()));
-static JOBS: Mutex<RefCell<VecDeque<Job>>> = Mutex::new(RefCell::new(VecDeque::new()));
-static NEXT: Mutex<RefCell<u32>> = Mutex::new(RefCell::new(0));
-
-fn publish(status: &str, mounted: bool, file_len: Option<u64>) {
-    critical_section::with(|cs| {
-        let mut state = STATE.borrow_ref_mut(cs);
-        state.mounted = mounted;
-        state.status.clear();
-        state.status.push_str(status);
-        if let Some(len) = file_len {
-            state.files = state.files.saturating_add(1);
-            state.bytes = state.bytes.saturating_add(len);
-        }
-    });
-}
-
-/// True once a FAT volume is open and writes are being serviced.
-pub fn ready() -> bool {
-    critical_section::with(|cs| STATE.borrow_ref(cs).mounted)
-}
-
-pub fn status_line() -> String {
-    critical_section::with(|cs| {
-        let state = STATE.borrow_ref(cs);
-        if state.mounted {
-            alloc::format!("SD: {} files, {} B", state.files, state.bytes)
-        } else if state.status.is_empty() {
-            String::from("SD: not mounted")
-        } else {
-            alloc::format!("SD: {}", state.status)
-        }
-    })
-}
-
-/// Queue a file write. Returns false when the card is absent or the queue is full.
-pub fn enqueue(name: &str, bytes: Vec<u8>, append: bool) -> bool {
-    if bytes.is_empty() || !ready() {
-        return false;
-    }
-    critical_section::with(|cs| {
-        let mut jobs = JOBS.borrow_ref_mut(cs);
-        if jobs.len() >= QUEUE_DEPTH {
-            return false;
-        }
-        jobs.push_back(Job {
-            name: String::from(name),
-            append,
-            bytes,
+impl ErrorType for SdBus<'_>{type Error=SpiError;}
+impl SpiDevice<u8> for SdBus<'_>{
+    fn transaction(&mut self,operations:&mut[Operation<'_,u8>])->Result<(),SpiError>{
+        let mut spi=self.spi.borrow_mut();self.cs.set_low();
+        let result=operations.iter_mut().try_for_each(|op|match op{
+            Operation::Read(data)=>spi.read(data),Operation::Write(data)=>spi.write(data),
+            Operation::Transfer(read,write)=>spi.transfer(read,write),
+            Operation::TransferInPlace(data)=>spi.transfer_in_place(data),
+            Operation::DelayNs(ns)=>{Delay::new().delay_nanos(*ns);Ok(())}
         });
-        true
+        let flushed=spi.flush();self.cs.set_high();result.and(flushed)
+    }
+}
+struct FixedClock;
+impl TimeSource for FixedClock{fn get_timestamp(&self)->Timestamp{Timestamp{year_since_1970:56,zero_indexed_month:10,zero_indexed_day:15,hours:0,minutes:0,seconds:0}}}
+#[derive(Clone)]
+pub struct FileRow{pub name:String,pub bytes:u32}
+#[derive(Clone)]
+pub struct WriteResult{pub ticket:u32,pub name:String,pub bytes:u64,pub success:bool,pub error:String}
+struct StorageState{mounted:bool,status:String,files:u32,bytes:u64,library:Vec<FileRow>,preview:String,completed:VecDeque<WriteResult>,failed:Vec<String>}
+impl StorageState{const fn new()->Self{Self{mounted:false,status:String::new(),files:0,bytes:0,library:Vec::new(),preview:String::new(),completed:VecDeque::new(),failed:Vec::new()}}}
+pub struct Job{pub ticket:u32,pub name:String,pub append:bool,pub bytes:Vec<u8>}
+enum Request{Write(Job),List,Preview(String),Recover(String)}
+static STATE:Mutex<RefCell<StorageState>>=Mutex::new(RefCell::new(StorageState::new()));
+static JOBS:Mutex<RefCell<VecDeque<Request>>>=Mutex::new(RefCell::new(VecDeque::new()));
+static NEXT:Mutex<RefCell<u32>>=Mutex::new(RefCell::new(0));
+static TICKET:Mutex<RefCell<u32>>=Mutex::new(RefCell::new(0));
+fn publish(status:&str,mounted:bool){critical_section::with(|cs|{let mut s=STATE.borrow_ref_mut(cs);s.mounted=mounted;s.status=String::from(status);});}
+pub fn ready()->bool{critical_section::with(|cs|STATE.borrow_ref(cs).mounted)}
+pub fn status_line()->String{critical_section::with(|cs|{let s=STATE.borrow_ref(cs);alloc::format!("SD: {} ({} files, {} B)",if s.status.is_empty(){"not mounted"}else{&s.status},s.files,s.bytes)})}
+pub fn completion(ticket:u32)->Option<WriteResult>{critical_section::with(|cs|STATE.borrow_ref(cs).completed.iter().find(|r|r.ticket==ticket).cloned())}
+pub fn library_snapshot()->(String,Vec<FileRow>){critical_section::with(|cs|{let s=STATE.borrow_ref(cs);(s.status.clone(),s.library.clone())})}
+pub fn preview()->String{critical_section::with(|cs|STATE.borrow_ref(cs).preview.clone())}
+pub fn enqueue(name:&str,bytes:Vec<u8>,append:bool)->bool{enqueue_tracked(name,bytes,append).is_some()}
+pub fn enqueue_tracked(name:&str,bytes:Vec<u8>,append:bool)->Option<u32>{enqueue_owned(name,bytes,append).ok()}
+/// Rejected owned data is returned intact so a capture can drain its valid prefix.
+pub fn enqueue_owned(name:&str,bytes:Vec<u8>,append:bool)->Result<u32,Vec<u8>>{
+    if bytes.is_empty()||bytes.len()>MAX_JOB_BYTES||!valid_file_name(name){return Err(bytes)}
+    critical_section::with(|cs|{
+        if !STATE.borrow_ref(cs).mounted{return Err(bytes)}
+        let mut jobs=JOBS.borrow_ref_mut(cs);
+        let queued:usize=jobs.iter().map(|r|if let Request::Write(j)=r{j.bytes.len()}else{0}).sum();
+        if jobs.len()>=QUEUE_DEPTH||queued+bytes.len()>QUEUE_BYTES{return Err(bytes)}
+        let mut next=TICKET.borrow_ref_mut(cs);*next=next.wrapping_add(1);let ticket=*next;
+        jobs.push_back(Request::Write(Job{ticket,name:String::from(name),append,bytes}));
+        STATE.borrow_ref_mut(cs).status=alloc::format!("queued {name}");Ok(ticket)
     })
 }
-
-/// Highest numeric suffix already on the card, so numbering survives reboots.
-pub fn next_name(stem: &str, extension: &str) -> String {
-    let index = critical_section::with(|cs| {
-        let mut next = NEXT.borrow_ref_mut(cs);
-        *next = next.wrapping_add(1);
-        *next
-    });
-    alloc::format!("{stem}{index:03}.{extension}")
+fn request(request:Request)->bool{critical_section::with(|cs|{
+    if !STATE.borrow_ref(cs).mounted{return false}
+    let mut q=JOBS.borrow_ref_mut(cs);if q.len()>=QUEUE_DEPTH{return false}q.push_back(request);true
+})}
+pub fn request_list()->bool{request(Request::List)}
+pub fn request_preview(name:&str)->bool{valid_file_name(name)&&request(Request::Preview(String::from(name)))}
+pub fn request_recover(name:&str)->bool{valid_file_name(name)&&request(Request::Recover(String::from(name)))}
+pub fn next_name(stem:&str,extension:&str)->String{
+    let index=critical_section::with(|cs|{let mut n=NEXT.borrow_ref_mut(cs);*n=n.saturating_add(1);*n});
+    file_name(stem,extension,index).unwrap_or_default()
 }
-
-fn scan_existing<D>(
-    manager: &VolumeManager<D, FixedClock, 4, 4, 1>,
-    volume: embedded_sdmmc::RawVolume,
-) -> u32
-where
-    D: embedded_sdmmc::BlockDevice,
-{
-    let mut highest = 0u32;
-    let Ok(root) = manager.open_root_dir(volume) else {
-        return 1;
-    };
-    let _ = manager.iterate_dir(root, |entry| {
-        let base = entry.name.base_name();
-        let mut value = 0u32;
-        let mut digits = 0usize;
-        for byte in base.iter().rev() {
-            if !byte.is_ascii_digit() {
-                break;
-            }
-            value += u32::from(byte - b'0') * 10u32.pow(digits as u32);
-            digits += 1;
-        }
-        if digits > 0 {
-            highest = highest.max(value);
-        }
-    });
-    let _ = manager.close_dir(root);
-    highest.saturating_add(1)
+type Manager<D>=VolumeManager<D,FixedClock,4,4,1>;
+fn list_files<D:embedded_sdmmc::BlockDevice>(m:&Manager<D>,v:embedded_sdmmc::RawVolume)->Result<Vec<FileRow>,&'static str>{
+    let root=m.open_root_dir(v).map_err(|_|"directory open failed")?;
+    let mut files=Vec::new();let mut highest=0u32;
+    let result=m.iterate_dir(root,|e|{
+        if e.attributes.is_directory(){return}
+        let name=alloc::format!("{}",e.name);
+        let base=e.name.base_name();let digits=base.iter().rev().take_while(|b|b.is_ascii_digit()).count();
+        if digits>0{let value=base[base.len()-digits..].iter().fold(0u32,|n,b|n.saturating_mul(10).saturating_add(u32::from(*b-b'0')));highest=highest.max(value);}
+        if files.len()<MAX_FILES{files.push(FileRow{name,bytes:e.size});}
+    }).map_err(|_|"directory read failed");
+    let closed=m.close_dir(root).map_err(|_|"directory close failed");
+    result.and(closed)?;
+    critical_section::with(|cs|{let mut n=NEXT.borrow_ref_mut(cs);*n=(*n).max(highest);});
+    files.sort_by(|a,b|a.name.cmp(&b.name));Ok(files)
 }
-
-fn take_job() -> Option<Job> {
-    critical_section::with(|cs| JOBS.borrow_ref_mut(cs).pop_front())
-}
-
-fn write_job<D>(
-    manager: &VolumeManager<D, FixedClock, 4, 4, 1>,
-    volume: embedded_sdmmc::RawVolume,
-    job: &Job,
-) -> Result<u64, ()>
-where
-    D: embedded_sdmmc::BlockDevice,
-{
-    let mode = if job.append {
-        Mode::ReadWriteCreateOrAppend
-    } else {
-        Mode::ReadWriteCreateOrTruncate
-    };
-    let root = manager.open_root_dir(volume).map_err(|_| ())?;
-    let file = manager
-        .open_file_in_dir(root, job.name.as_str(), mode)
-        .map_err(|_| {
-            let _ = manager.close_dir(root);
-        })?;
-    let mut written = 0u64;
-    for chunk in job.bytes.chunks(512) {
-        if manager.write(file, chunk).is_err() {
-            let _ = manager.close_file(file);
-            let _ = manager.close_dir(root);
-            return Err(());
-        }
-        written += chunk.len() as u64;
+async fn write_job<D:embedded_sdmmc::BlockDevice>(m:&Manager<D>,v:embedded_sdmmc::RawVolume,j:&Job)->Result<u64,&'static str>{
+    let blocked=critical_section::with(|cs|STATE.borrow_ref(cs).failed.contains(&j.name));
+    if blocked{return Err("earlier write failed; recover capture")}
+    let root=m.open_root_dir(v).map_err(|_|"directory open failed")?;
+    // New exports must not overwrite an existing capture.
+    let mode=if j.append{Mode::ReadWriteCreateOrAppend}else{Mode::ReadWriteCreate};
+    let file=match m.open_file_in_dir(root,j.name.as_str(),mode){Ok(f)=>f,Err(_)=>{let _=m.close_dir(root);return Err("file open failed")}};
+    let mut result=Ok(j.bytes.len()as u64);
+    for chunk in j.bytes.chunks(512){
+        if m.write(file,chunk).is_err(){result=Err("data write failed");break}
+        embassy_time::Timer::after(embassy_time::Duration::from_millis(1)).await;
     }
-    let _ = manager.close_file(file);
-    let _ = manager.close_dir(root);
-    Ok(written)
+    let closed=m.close_file(file).map_err(|_|"file close failed");
+    let dir_closed=m.close_dir(root).map_err(|_|"directory close failed");
+    result=result.and(closed.map(|_|j.bytes.len()as u64)).and(dir_closed.map(|_|j.bytes.len()as u64));
+    result
 }
-
-/// Own the card for the lifetime of the firmware.
-pub async fn run(bus: SdBus<'static>) -> ! {
-    let card = SdCard::new(bus, Delay::new());
-    let manager = VolumeManager::new(card, FixedClock);
-    let volume = match manager.open_volume(VolumeIdx(0)) {
-        Ok(volume) => {
-            let raw = volume.to_raw_volume();
-            let next = scan_existing(&manager, raw);
-            critical_section::with(|cs| *NEXT.borrow_ref_mut(cs) = next);
-            publish("mounted", true, None);
-            Some(raw)
+fn read_exact<D:embedded_sdmmc::BlockDevice>(m:&Manager<D>,f:embedded_sdmmc::RawFile,data:&mut[u8])->Result<bool,&'static str>{
+    let mut at=0;while at<data.len(){let n=m.read(f,&mut data[at..]).map_err(|_|"file read failed")?;if n==0{return Ok(false)}at+=n;}Ok(true)
+}
+fn file_preview<D:embedded_sdmmc::BlockDevice>(m:&Manager<D>,v:embedded_sdmmc::RawVolume,name:&str)->Result<String,&'static str>{
+    let root=m.open_root_dir(v).map_err(|_|"directory open failed")?;
+    let file=match m.open_file_in_dir(root,name,Mode::ReadOnly){Ok(f)=>f,Err(_)=>{let _=m.close_dir(root);return Err("file open failed")}};
+    let mut bytes=[0u8;512];let read=m.read(file,&mut bytes).map_err(|_|"file read failed");
+    let closed=m.close_file(file).map_err(|_|"file close failed");let dir=m.close_dir(root).map_err(|_|"directory close failed");
+    let n=read?;closed?;dir?;
+    if let Some(snap)=pcap_snaplen(&bytes[..n]){
+        Ok(alloc::format!("{name}\nPCAP radiotap | snapshot {snap} B\n{}",cyberdeck_core::packet::hexdump(&bytes[..n],6)))
+    }else{Ok(alloc::format!("{name}\n{}",bytes[..n].iter().map(|b|if b.is_ascii_graphic()||matches!(*b,b' '|b'\n'|b'\r'|b'\t'){char::from(*b)}else{'.'}).collect::<String>()))}
+}
+async fn recover<D:embedded_sdmmc::BlockDevice>(m:&Manager<D>,v:embedded_sdmmc::RawVolume,name:&str)->Result<String,&'static str>{
+    let root=m.open_root_dir(v).map_err(|_|"directory open failed")?;
+    let source=match m.open_file_in_dir(root,name,Mode::ReadOnly){Ok(f)=>f,Err(_)=>{let _=m.close_dir(root);return Err("source open failed")}};
+    let output=next_name("REC","CAP");
+    let destination=match m.open_file_in_dir(root,output.as_str(),Mode::ReadWriteCreate){Ok(f)=>f,Err(_)=>{let _=m.close_file(source);let _=m.close_dir(root);return Err("recovery file open failed")}};
+    let mut records=0u32;let mut bytes=24u64;
+    let result=async{
+        let mut header=[0u8;24];if !read_exact(m,source,&mut header)?{return Err("short PCAP header")}
+        let snap=pcap_snaplen(&header).ok_or("unsupported PCAP header")?;
+        if snap>2048{return Err("snapshot exceeds recovery buffer")}
+        m.write(destination,&header).map_err(|_|"recovery write failed")?;
+        loop{
+            let mut h=[0u8;16];if !read_exact(m,source,&mut h)?{break}
+            let Some(size)=pcap_record_size(&h,snap)else{break};
+            let mut payload=[0u8;2048];let n=size-16;
+            if !read_exact(m,source,&mut payload[..n])?{break}
+            m.write(destination,&h).map_err(|_|"recovery write failed")?;
+            for part in payload[..n].chunks(512){m.write(destination,part).map_err(|_|"recovery write failed")?;embassy_time::Timer::after(embassy_time::Duration::from_millis(1)).await;}
+            records=records.saturating_add(1);bytes+=size as u64;
         }
-        Err(_) => {
-            publish("no FAT volume", false, None);
-            None
-        }
+        Ok(())
+    }.await;
+    let closed_source=m.close_file(source).map_err(|_|"source close failed");
+    let closed=m.close_file(destination).map_err(|_|"recovery close failed");
+    let dir=m.close_dir(root).map_err(|_|"directory close failed");
+    result?;closed_source?;closed?;dir?;
+    Ok(alloc::format!("Recovered {output}: {records} records, {bytes} B; original kept"))
+}
+pub async fn run(bus:SdBus<'static>)->!{
+    let card=SdCard::new(bus,Delay::new());let manager=VolumeManager::new(card,FixedClock);
+    let volume=match manager.open_volume(VolumeIdx(0)){
+        Ok(v)=>{let raw=v.to_raw_volume();match list_files(&manager,raw){Ok(files)=>{critical_section::with(|cs|STATE.borrow_ref_mut(cs).library=files);publish("mounted",true)},Err(e)=>publish(e,false)}Some(raw)}
+        Err(_)=>{publish("no FAT volume",false);None}
     };
-
-    loop {
-        if let Some(volume) = volume {
-            while let Some(job) = take_job() {
-                match write_job(&manager, volume, &job) {
-                    Ok(len) => publish("written", true, Some(len)),
-                    Err(()) => publish("write failed", true, None),
+    loop{
+        let request=critical_section::with(|cs|JOBS.borrow_ref_mut(cs).pop_front());
+        if let Some(request)=request{
+            if let Some(v)=volume{match request{
+                Request::Write(job)=>{
+                    let result=write_job(&manager,v,&job).await;
+                    critical_section::with(|cs|{
+                        let mut s=STATE.borrow_ref_mut(cs);let success=result.is_ok();let bytes=result.as_ref().copied().unwrap_or(0);
+                        let error=result.err().unwrap_or("");
+                        if success{s.files=s.files.saturating_add(u32::from(!job.append));s.bytes=s.bytes.saturating_add(bytes);s.status=alloc::format!("saved {} ({} B)",job.name,bytes);}
+                        else{s.status=alloc::format!("{}: {error}",job.name);if s.failed.len()<8&&!s.failed.contains(&job.name){s.failed.push(job.name.clone());}}
+                        if s.completed.len()>=24{s.completed.pop_front();}
+                        s.completed.push_back(WriteResult{ticket:job.ticket,name:job.name,bytes,success,error:String::from(error)});
+                    });
                 }
-            }
+                Request::List=>match list_files(&manager,v){Ok(files)=>{let count=files.len();critical_section::with(|cs|STATE.borrow_ref_mut(cs).library=files);publish(&alloc::format!("{count} files (max {MAX_FILES})"),true)},Err(e)=>publish(e,false)},
+                Request::Preview(name)=>match file_preview(&manager,v,&name){Ok(text)=>{critical_section::with(|cs|STATE.borrow_ref_mut(cs).preview=text);publish("preview loaded",true)},Err(e)=>publish(e,false)},
+                Request::Recover(name)=>match recover(&manager,v,&name).await{Ok(text)=>publish(&text,true),Err(e)=>publish(e,false)},
+            }}
         }
-        embassy_time::Timer::after(embassy_time::Duration::from_millis(50)).await;
+        embassy_time::Timer::after(embassy_time::Duration::from_millis(5)).await;
     }
 }

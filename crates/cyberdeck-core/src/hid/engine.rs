@@ -579,10 +579,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(mice.len(), 3);
+        assert_eq!(mice.len(), 4);
         assert_eq!((mice[0].dx, mice[0].dy), (5, -5));
         assert_eq!(mice[1].buttons, MouseReport::LEFT_BUTTON);
-        assert_eq!(mice[2].wheel, -2);
+        assert_eq!(mice[2].buttons, 0, "release click before scrolling");
+        assert_eq!(mice[3].wheel, -2);
     }
 
     #[test]

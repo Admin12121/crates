@@ -132,12 +132,17 @@ pub struct BoardProfile {
     pub sd: SpiPins,
     pub nrf24: Option<Nrf24Pins>,
     pub battery: Option<BatteryPins>,
+    pub gps: Option<GpsPins>,
     /// Classes this profile can support at all.
     pub supported: &'static [DeviceClass],
     /// Classes that are enhancements only.
     pub optional: &'static [DeviceClass],
     pub coex: CoexPolicy,
 }
+
+/// Optional UART NMEA receiver wiring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpsPins { pub rx: u8, pub tx: u8, pub baud: u32 }
 
 /// Battery sense wiring: the ADC pin plus the resistor-divider ratio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,7 +177,7 @@ impl BoardId {
 /// module, so the map below stays clear of both.
 pub const CORE_PROFILE: BoardProfile = BoardProfile {
     id: BoardId::CoreS3DevKit,
-    name: "CyberDeck CORE (ESP32-S3 DevKitC-1)",
+    name: "Admin12121 CORE (ESP32-S3 DevKitC-1)",
     mcu: "ESP32-S3 WROOM-1 (octal PSRAM)",
     display_controller: DisplayController::Ili9341,
     display_geometry: DisplayGeometry {
@@ -204,6 +209,7 @@ pub const CORE_PROFILE: BoardProfile = BoardProfile {
     },
     nrf24: None,
     battery: Some(BatteryPins { pin: 8, divider: 2 }),
+    gps: None,
     supported: &[
         DeviceClass::WifiRadio,
         DeviceClass::BleRadio,
@@ -220,7 +226,8 @@ pub const CORE_PROFILE: BoardProfile = BoardProfile {
 /// FIELD: CORE plus one nRF24L01 module on the shared SPI bus.
 pub const FIELD_PROFILE: BoardProfile = BoardProfile {
     id: BoardId::FieldS3,
-    name: "CyberDeck FIELD (ESP32-S3 + nRF24L01)",
+    gps: Some(GpsPins { rx: 18, tx: 17, baud: 9600 }),
+    name: "Admin12121 FIELD (ESP32-S3 + nRF24L01)",
     mcu: "ESP32-S3 WROOM-1 (octal PSRAM)",
     nrf24: Some(Nrf24Pins {
         sck: 39,
@@ -238,6 +245,7 @@ pub const FIELD_PROFILE: BoardProfile = BoardProfile {
         DeviceClass::Input,
         DeviceClass::BatteryAdc,
         DeviceClass::Nrf24,
+        DeviceClass::Gps,
     ],
     optional: &[DeviceClass::Gps],
     coex: CoexPolicy::ExclusiveNrf24,

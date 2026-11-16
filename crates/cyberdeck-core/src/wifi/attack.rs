@@ -168,7 +168,7 @@ pub const SPAM_SSIDS: &[&[u8]] = &[
     b"Airport WiFi",
     b"Hotel Guest",
     b"Cafe WiFi",
-    b"CyberDeck Lab",
+    b"Admin12121 Lab",
     b"Network Setup",
     b"Update Required",
     b"Sign In To Continue",

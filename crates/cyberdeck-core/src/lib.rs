@@ -32,6 +32,7 @@ pub mod gps;
 pub mod hid;
 pub mod job;
 pub mod net;
+pub mod network;
 pub mod packet;
 pub mod pcap;
 pub mod rf;

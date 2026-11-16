@@ -176,6 +176,7 @@ impl ProtocolHistogram {
 pub struct CaptureFilter {
     pub management_only: bool,
     pub data_only: bool,
+    pub eapol_only: bool,
     pub bssid: Option<MacAddr>,
     pub min_length: u16,
     pub max_length: u16,
@@ -186,6 +187,7 @@ impl Default for CaptureFilter {
         Self {
             management_only: false,
             data_only: false,
+            eapol_only: false,
             bssid: None,
             min_length: 0,
             max_length: MAX_FRAME_BYTES as u16,
@@ -215,8 +217,9 @@ impl CaptureFilter {
             return false;
         }
         let Some(header) = FrameHeader::parse(data) else {
-            return !self.management_only && !self.data_only;
+            return !self.management_only && !self.data_only && !self.eapol_only && self.bssid.is_none();
         };
+        if self.eapol_only && classify(data).0 != FrameKind::Eapol {return false}
         if self.management_only && !header.fc.is_management() {
             return false;
         }
@@ -235,7 +238,8 @@ impl CaptureFilter {
     /// One-line description for the run screen.
     pub fn describe(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
-        if self.management_only {
+        if self.eapol_only {parts.push(String::from("EAPOL only"));}
+        else if self.management_only {
             parts.push(String::from("mgmt only"));
         } else if self.data_only {
             parts.push(String::from("data only"));
@@ -392,7 +396,7 @@ impl CaptureSummary {
     /// Text report written next to the pcap (`<name>.txt`).
     pub fn report(&self, filename: &str) -> String {
         let mut out = String::new();
-        let _ = writeln!(out, "CyberDeck capture report");
+        let _ = writeln!(out, "Admin12121 capture report");
         let _ = writeln!(out, "file: {filename}");
         let _ = writeln!(out, "frames: {}", self.frames);
         let _ = writeln!(out, "payload bytes: {}", self.bytes);

@@ -61,11 +61,11 @@ impl Nmea{
   let(lat_i,ns_i,lon_i,ew_i)=if rmc{(3,4,5,6)}else{(2,3,4,5)};
   let Some(lat)=parse_coordinate(get(lat_i),get(ns_i),true)else{self.malformed=self.malformed.saturating_add(1);return false;};
   let Some(lon)=parse_coordinate(get(lon_i),get(ew_i),false)else{self.malformed=self.malformed.saturating_add(1);return false;};
-  let time=get(1);if time.len()<6||time.len()>10||!time.bytes().all(|b|b.is_ascii_digit()||b==b'.'){self.malformed=self.malformed.saturating_add(1);return false;}
+  let time=get(1);if !valid_clock(time){self.malformed=self.malformed.saturating_add(1);return false;}
   let mut fix=self.latest.take().unwrap_or_default();
   fix.latitude_e7=lat;fix.longitude_e7=lon;fix.utc_time=time.to_string();fix.received_ms=now;
   if rmc{
-   let date=get(9);if date.len()==6&&date.bytes().all(|b|b.is_ascii_digit()){fix.utc_date=date.to_string();}
+   let date=get(9);if !valid_date(date){self.valid=false;self.malformed=self.malformed.saturating_add(1);return false;}fix.utc_date=date.to_string();
    fix.speed_kmh_tenths=(scaled_decimal(get(7),1000).unwrap_or(0).max(0).saturating_mul(1852)/100000).min(u16::MAX as i64) as u16;
   }else{
    fix.satellites=get(7).parse::<u8>().unwrap_or(0);
@@ -100,3 +100,10 @@ impl<const N:usize> TrackLog<N>{
  pub fn points(&self)->&[TrackPoint]{&self.points}
  pub fn csv(&self)->String{let mut out=String::from("uptime_ms,utc_date,utc_time,latitude,longitude,altitude_dm,satellites,hdop_centi\n");for p in &self.points{out.push_str(&p.fix.csv_row(p.uptime_ms));}out}
 }
+
+fn valid_clock(time:&str)->bool{if time.len()<6||time.len()>10{return false;}let bytes=time.as_bytes();if !bytes[..6].iter().all(u8::is_ascii_digit){return false;}if bytes.len()>6&&(bytes[6]!=b'.'||bytes.len()==7||!bytes[7..].iter().all(u8::is_ascii_digit)){return false;}let hour=(bytes[0]-b'0')*10+bytes[1]-b'0';let minute=(bytes[2]-b'0')*10+bytes[3]-b'0';let second=(bytes[4]-b'0')*10+bytes[5]-b'0';hour<24&&minute<60&&(second<60||(hour==23&&minute==59&&second==60))}
+fn valid_date(date:&str)->bool{if date.len()!=6||!date.bytes().all(|b|b.is_ascii_digit()){return false;}let bytes=date.as_bytes();let day=(bytes[0]-b'0')*10+bytes[1]-b'0';let month=(bytes[2]-b'0')*10+bytes[3]-b'0';let year=(bytes[4]-b'0')*10+bytes[5]-b'0';let days=match month{1|3|5|7|8|10|12=>31,4|6|9|11=>30,2=>if year%4==0{29}else{28},_=>0};day>0&&day<=days}
+pub struct WardriveObservation<'a>{pub address:&'a str,pub name:&'a str,pub auth:&'a str,pub channel:u8,pub rssi:i8,pub kind:&'a str}
+pub fn wigle_header()->&'static str{"WigleWifi-1.4,appRelease=0.1,model=Admin12121,release=0.1,device=ESP32S3,display=Admin12121,board=FIELD,brand=Admin12121\nMAC,SSID,AuthMode,FirstSeen,Channel,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type\n"}
+pub fn utc_datetime(fix:&Fix)->Option<String>{if !valid_date(&fix.utc_date)||!valid_clock(&fix.utc_time){return None;}let date=&fix.utc_date;let year=date[4..6].parse::<u16>().ok()?;let year=if year<80{2000+year}else{1900+year};Some(format!("{year}-{}-{} {}:{}:{}",&date[2..4],&date[..2],&fix.utc_time[..2],&fix.utc_time[2..4],&fix.utc_time[4..6]))}
+pub fn wigle_row(fix:&Fix,observation:&WardriveObservation<'_>)->Option<String>{let time=utc_datetime(fix)?;let name=observation.name.replace('"',"\"\"").replace(['\r','\n']," ");Some(format!("{},\"{}\",{},{},{},{},{},{},{}.{},0,{}\n",observation.address,name,observation.auth,time,observation.channel,observation.rssi,fix.latitude(),fix.longitude(),fix.altitude_dm/10,fix.altitude_dm.unsigned_abs()%10,observation.kind))}

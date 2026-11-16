@@ -57,6 +57,7 @@ smoltcp = { version = "0.14.0", default-features = false, features = [
   "socket-udp",
 ] }
 trouble-host = { version = "0.7.0", features = [
+  "security",
   "scan",
   "central",
   "gatt",
@@ -69,6 +70,7 @@ embedded-hal     = "1.0"
 embedded-sdmmc   = "0.9"
 embassy-usb      = { version = "0.5", features = ["max-handler-count-3", "max-interface-count-3"] }
 embassy-futures  = "0.1"
+embassy-sync     = "0.8"
 
 [workspace]
 members  = [".", "crates/cyberdeck-core"]

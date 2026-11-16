@@ -7,6 +7,7 @@ use alloc::string::String;
 pub struct SessionGate { next: u32, pending: Option<u32>, active: Option<u32>, cancelled: bool }
 impl SessionGate {
     pub const fn new()->Self { Self { next:0,pending:None,active:None,cancelled:false } }
+    pub fn busy(&self)->bool {self.pending.is_some() || self.active.is_some()}
     pub fn reserve(&mut self)->Option<u32> {
         if self.pending.is_some() || self.active.is_some() {return None}
         self.next=self.next.wrapping_add(1); self.pending=Some(self.next); self.cancelled=false; Some(self.next)
