@@ -8,6 +8,9 @@ a development smoke test, **not proof of field hardware functionality**.
 
 The physical-board firmware keeps the ST7789 controller. The Wokwi build
 selects ILI9341, because Wokwi currently provides ILI9341 rather than ST7789.
+The Wokwi ILI9341 component sets `flipHorizontal: "1"` in `diagram.json`
+to correct the simulator panel's left-right mirror. This setting affects only
+Wokwi and does not change the physical TFT firmware or its orientation.
 Do not flash the Wokwi build to the physical ST7789 configuration.
 
 ## Build and run

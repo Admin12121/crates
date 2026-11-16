@@ -169,12 +169,6 @@ async fn main(spawner: Spawner) -> ! {
     let spi_config = SpiConfig::default()
         .with_frequency(Rate::from_mhz(40))
         .with_mode(Mode::_0);
-    // Wokwi offers an ILI9341; real board builds keep the ST7789 profile.
-    let display_controller = if cfg!(cyberdeck_sim_wokwi) {
-        board::DisplayController::Ili9341
-    } else {
-        profile.display_controller
-    };
     let mut display = match Spi::new(peripherals.SPI2, spi_config) {
         Ok(spi) => {
             let spi = spi
@@ -188,8 +182,12 @@ async fn main(spawner: Spawner) -> ! {
                 Output::new(peripherals.GPIO14, Level::High, output),
                 Some(Output::new(peripherals.GPIO13, Level::Low, output)),
                 profile.display_geometry,
-                display_controller,
-                profile.display_orientation,
+                profile.display_controller,
+                if cfg!(cyberdeck_sim_wokwi) {
+                    board::DisplayOrientation::Rotate0
+                } else {
+                    profile.display_orientation
+                },
                 profile.display_inverted,
             )
             .map_err(|error| error.message())
@@ -550,42 +548,41 @@ async fn main(spawner: Spawner) -> ! {
             }
         }
 
-        let (status, aps, frames, dropped) = wifi::snapshot();
-        let (ble_status, ble_devices, ble_frames) = ble::snapshot();
-        let (usb_status, usb_percent, usb_keystrokes, usb_unsupported) = usb::snapshot();
-        let button_levels = buttons.levels();
-        let mut live = Live {
-            wifi_status: status,
-            wifi_busy: false,
-            aps,
-            wifi_frames: frames,
-            wifi_dropped: dropped,
-            rf_envelope: rf.envelope(),
-            rf_peak: rf.spectrum.peak_channel().unwrap_or(0),
-            rf_packets: rf.packets,
-            rf_dropped: rf.log.dropped(),
-            ble_status,
-            ble_devices,
-            ble_frames,
-            usb_status,
-            usb_percent,
-            usb_keystrokes,
-            usb_unsupported,
-            buttons: button_levels,
-            probe_lines: {
-                let mut lines = probe.lines.clone();
-                lines.push(sd::status_line());
-                lines.push(battery::status_line());
-                lines
-            },
-            message: app.message(),
-        };
-        live.wifi_busy = matches!(rf_mode, RfMode::Off);
-        app.set_live(live);
-
-        // Coalesce repaints: a full 240x320 frame at 40 MHz takes longer than the
-        // 20 ms input tick, so the UI refreshes at 4 Hz unless nothing changed.
+        // Keep input responsive at 50 Hz; acquire/clones live radio and storage state
+        // only at the 4 Hz display cadence to avoid allocating every input tick.
         if now_ms.saturating_sub(last_render_ms) >= 250 {
+            let (status, aps, frames, dropped) = wifi::snapshot();
+            let (ble_status, ble_devices, ble_frames) = ble::snapshot();
+            let (usb_status, usb_percent, usb_keystrokes, usb_unsupported) = usb::snapshot();
+            let button_levels = buttons.levels();
+            let mut live = Live {
+                wifi_status: status,
+                wifi_busy: false,
+                aps,
+                wifi_frames: frames,
+                wifi_dropped: dropped,
+                rf_envelope: rf.envelope(),
+                rf_peak: rf.spectrum.peak_channel().unwrap_or(0),
+                rf_packets: rf.packets,
+                rf_dropped: rf.log.dropped(),
+                ble_status,
+                ble_devices,
+                ble_frames,
+                usb_status,
+                usb_percent,
+                usb_keystrokes,
+                usb_unsupported,
+                buttons: button_levels,
+                probe_lines: {
+                    let mut lines = probe.lines.clone();
+                    lines.push(sd::status_line());
+                    lines.push(battery::status_line());
+                    lines
+                },
+                message: app.message(),
+            };
+            live.wifi_busy = matches!(rf_mode, RfMode::Off);
+            app.set_live(live);
             if let Ok(panel) = display.as_mut() {
                 if app.take_dirty() {
                     app.render(panel);

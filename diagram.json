@@ -19,7 +19,9 @@
       "id": "lcd",
       "top": -80,
       "left": 370,
-      "attrs": {}
+      "attrs": {
+        "flipHorizontal": "1"
+      }
     },
     {
       "type": "wokwi-microsd-card",

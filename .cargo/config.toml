@@ -7,6 +7,8 @@ runner = "espflash flash --monitor --chip esp32s3"
 [build]
 rustflags = [
   "-C", "link-arg=-nostartfiles",
+  # esp-hal keeps RAM-resident code in a W+X segment; the warning is expected.
+  "-C", "link-arg=-Wl,--no-warn-rwx-segments",
   "-Z", "stack-protector=all",
 ]
 

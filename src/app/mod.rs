@@ -152,6 +152,7 @@ impl Live {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Home,
     Group(Group),
@@ -167,6 +168,8 @@ pub struct App {
     registry: PeripheralRegistry,
     live: Live,
     needs_render: bool,
+    last_rendered: Option<Screen>,
+    last_menu_selection: Option<usize>,
 }
 
 const ROWS_PER_SCREEN: usize = 9;
@@ -180,6 +183,8 @@ impl App {
             registry,
             live: Live::default(),
             needs_render: true,
+            last_rendered: None,
+            last_menu_selection: None,
         };
         app.home = MenuList::new(
             "CYBERDECK",
@@ -405,49 +410,99 @@ impl App {
         }
     }
 
-    pub fn render(&self, canvas: &mut impl Canvas) {
-        canvas.fill_rect(
-            Rect::new(0, 0, canvas.width(), canvas.height()),
-            theme::BACKGROUND,
-        );
-        let title = match &self.screen {
-            Screen::Home => "CYBERDECK",
-            Screen::Group(group) => group.title(),
-            Screen::Running(tool) => tool.title(),
-            Screen::Diagnostics => "DIAGNOSTICS",
-        };
-        canvas.fill_rect(Rect::new(0, 0, canvas.width(), 20), theme::SURFACE);
-        canvas.draw_text(4, 4, title, theme::ACCENT, theme::SURFACE, 2);
+    /// Paint the full panel only when the screen changes. Scrolling a menu
+    /// updates the old and new selection rows, avoiding a visible black flash
+    /// from transferring a 240x320 background on every button event.
+    pub fn render(&mut self, canvas: &mut impl Canvas) {
+        let screen_changed = self.last_rendered != Some(self.screen);
+        if screen_changed {
+            canvas.fill_rect(
+                Rect::new(0, 0, canvas.width(), canvas.height()),
+                theme::BACKGROUND,
+            );
+            let title = match &self.screen {
+                Screen::Home => "CYBERDECK",
+                Screen::Group(group) => group.title(),
+                Screen::Running(tool) => tool.title(),
+                Screen::Diagnostics => "DIAGNOSTICS",
+            };
+            canvas.fill_rect(Rect::new(0, 0, canvas.width(), 20), theme::SURFACE);
+            canvas.draw_text(4, 4, title, theme::ACCENT, theme::SURFACE, 2);
+        }
+
         match &self.screen {
-            Screen::Home => self.render_menu(canvas, &self.home, 24),
+            Screen::Home => self.render_menu(
+                canvas,
+                &self.home,
+                24,
+                screen_changed,
+                self.last_menu_selection,
+            ),
             Screen::Group(_) => {
                 if let Some(menu) = &self.group {
-                    self.render_menu(canvas, menu, 24);
+                    self.render_menu(canvas, menu, 24, screen_changed, self.last_menu_selection);
                 }
             }
-            Screen::Running(tool) => self.render_running(canvas, *tool),
-            Screen::Diagnostics => self.render_diagnostics(canvas),
+            Screen::Running(tool) => {
+                if !screen_changed {
+                    canvas.fill_rect(
+                        Rect::new(0, 20, canvas.width(), canvas.height().saturating_sub(36)),
+                        theme::BACKGROUND,
+                    );
+                }
+                self.render_running(canvas, *tool);
+            }
+            Screen::Diagnostics => {
+                if !screen_changed {
+                    canvas.fill_rect(
+                        Rect::new(0, 20, canvas.width(), canvas.height().saturating_sub(36)),
+                        theme::BACKGROUND,
+                    );
+                }
+                self.render_diagnostics(canvas);
+            }
         }
-        self.render_footer(canvas);
+
+        if screen_changed {
+            self.render_footer(canvas);
+        }
+        self.last_rendered = Some(self.screen);
+        self.last_menu_selection = match &self.screen {
+            Screen::Home => Some(self.home.selected()),
+            Screen::Group(_) => self.group.as_ref().map(MenuList::selected),
+            _ => None,
+        };
     }
 
-    fn render_menu(&self, canvas: &mut impl Canvas, menu: &MenuList, top: i16) {
+    fn render_menu(
+        &self,
+        canvas: &mut impl Canvas,
+        menu: &MenuList,
+        top: i16,
+        full: bool,
+        previous_selection: Option<usize>,
+    ) {
         let width = canvas.width();
-        canvas.fill_rect(
-            Rect::new(0, top, width, canvas.height() - top as u16 - 16),
-            theme::BACKGROUND,
-        );
-        let columns = (width / (font::ADVANCE as u16 * theme::BODY_SCALE as u16)) as usize;
+        // Four pixels of left padding must be subtracted from available width,
+        // otherwise a padded menu line is rejected by the display driver.
+        let columns = (width.saturating_sub(8) / u16::from(font::ADVANCE)) as usize;
         for (row, (index, item)) in menu.visible().enumerate() {
-            let y = top + row as i16 * 20;
             let selected = index == menu.selected();
-            if selected {
-                canvas.fill_rect(Rect::new(0, y, width, 18), theme::SELECTION);
+            if !full && !selected && previous_selection != Some(index) {
+                continue;
             }
+            let y = top + row as i16 * 20;
+            canvas.fill_rect(
+                Rect::new(0, y, width, 18),
+                if selected {
+                    theme::SELECTION
+                } else {
+                    theme::BACKGROUND
+                },
+            );
             let colour = match item.status {
                 ItemStatus::Ready => theme::TEXT,
-                ItemStatus::Implemented => theme::ACCENT,
-                ItemStatus::Running => theme::ACCENT,
+                ItemStatus::Implemented | ItemStatus::Running => theme::ACCENT,
                 ItemStatus::RequiresHardware { .. } => theme::WARNING,
                 ItemStatus::ComingSoon => theme::TEXT_DIM,
             };
@@ -457,11 +512,7 @@ impl App {
                 y + 4,
                 &line,
                 colour,
-                if selected {
-                    theme::SELECTION
-                } else {
-                    theme::BACKGROUND
-                },
+                if selected { theme::SELECTION } else { theme::BACKGROUND },
                 1,
             );
         }

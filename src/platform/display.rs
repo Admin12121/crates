@@ -301,17 +301,22 @@ impl Canvas for Display<'_> {
     /// glyph. Per-glyph windows cost three commands each and make text-dense
     /// screens extremely slow over SPI.
     fn draw_text(&mut self, x: i16, y: i16, text: &str, color: Rgb565, bg: Rgb565, scale: u8) {
-        let count = text.chars().count();
+        let scale = scale.max(1) as u16;
+        let advance = u16::from(font::ADVANCE) * scale;
+        let h = u16::from(font::GLYPH_H) * scale;
+        if x < 0 || y < 0 || y as u16 + h > self.height || x as u16 >= self.width {
+            return;
+        }
+        // Truncate long diagnostic and menu strings to the remaining pixels.
+        // Previously, a single oversized line silently disappeared.
+        let count = text
+            .chars()
+            .count()
+            .min(usize::from((self.width - x as u16) / advance));
         if count == 0 {
             return;
         }
-        let scale = scale.max(1) as u16;
-        let advance = u16::from(font::ADVANCE) * scale;
         let w = advance * count as u16;
-        let h = u16::from(font::GLYPH_H) * scale;
-        if x < 0 || y < 0 || x as u16 + w > self.width || y as u16 + h > self.height {
-            return;
-        }
         self.cs.set_low();
         if self.set_window_held(Rect::new(x, y, w, h)).is_err() {
             self.cs.set_high();
@@ -323,7 +328,7 @@ impl Canvas for Display<'_> {
         let mut sink = PixelSink::new(&mut self.spi);
         for py in 0..u16::from(font::GLYPH_H) {
             for _ in 0..scale {
-                for ch in text.chars() {
+                for ch in text.chars().take(count) {
                     let glyph = font::glyph(ch);
                     for px in 0..u16::from(font::GLYPH_W) {
                         let bytes = if glyph[px as usize] & (1 << py) != 0 {
