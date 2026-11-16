@@ -446,7 +446,7 @@ async fn attack_session(controller: &mut WifiController<'static>, mode: AttackMo
     // A selected AP turns broadcast deauth into a per-BSSID test; beacon spam
     // keeps rotating its own identity, so it never pins the runner.
     if let Some(bssid)=target{runner.set_bssids(&[bssid]);}
-    let name=match mode{AttackMode::Deauth=>"Disconnect test",AttackMode::Disassoc=>"Soft disconnect",AttackMode::BeaconSpam=>"Fake networks",_=>mode.label()};
+    let name=match mode{AttackMode::Deauth=>"Disconnect test",AttackMode::Disassoc=>"Soft disconnect",AttackMode::AuthFlood=>"Join flood",AttackMode::ProbeFlood=>"Name flood",AttackMode::BeaconSpam=>"Fake networks"};
     set_status(&match target{Some(bssid)=>alloc::format!("{name} on {bssid}"),None=>String::from(name)});
     let mut sniffer = controller.sniffer();
     let mut frame = FrameBuffer::new();
@@ -655,6 +655,8 @@ async fn portal_session(controller:&mut WifiController<'static>,token:u32,ssid:S
         set_status(&alloc::format!("Could not open the fake network: {error:?}"));return
     }
     if stop_requested(){set_status("Cancelled");return}
+    // Session counters reset here so the screen shows this run, not history.
+    critical_section::with(|cs|{let mut s=WIFI_STATE.borrow_ref_mut(cs);s.portal_macs.clear();s.portal_requests=0;});
     if portal_net.is_none(){
         let Some(interface)=esp_radio::wifi::Interface::try_access_point()else{
             set_status("Radio busy");return

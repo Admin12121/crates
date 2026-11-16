@@ -2,7 +2,7 @@
 use alloc::{format,string::{String,ToString},vec::Vec};
 use core::cell::RefCell;
 use critical_section::Mutex;
-use cyberdeck_core::gps::{Fix,Nmea,FixHistory,ObservationCursor,wigle_header,wigle_row,WardriveObservation};
+use cyberdeck_core::gps::{Fix,Nmea,FixHistory,ObservationCursor,TrackLog,wigle_header,wigle_row,WardriveObservation};
 use esp_hal::{Async,uart::UartRx};
 use embassy_time::{Duration,Instant,Timer,with_timeout};
 use super::sd;
@@ -43,15 +43,31 @@ fn save_fix(f:&Fix,now:u64,history:&FixHistory<8>,cursor:&mut ObservationCursor<
  if let Some(ticket)=sd::enqueue_tracked(&name,bytes.into_bytes(),true){critical_section::with(|cs|{let mut s=STATE.borrow_ref_mut(cs);s.points=s.points.saturating_add(1);s.ticket=Some(ticket);});}else{critical_section::with(|cs|STATE.borrow_ref_mut(cs).recording=false);message("Recording stopped: card unavailable");}
 }
 pub async fn run(mut uart:UartRx<'static,Async>)->!{
- let mut parser=Nmea::new();let mut buffer=[0;96];let mut last_record=0;let mut last_publish=0;let mut history=FixHistory::<8>::new();let mut cursor=ObservationCursor::<64>::new();
+ let mut parser=Nmea::new();let mut buffer=[0;96];let mut last_record=0;let mut last_publish=0;let mut history=FixHistory::<8>::new();let mut cursor=ObservationCursor::<64>::new();let mut track=TrackLog::<256>::new();
  loop{
-  if let Some(command)=critical_section::with(|cs|COMMAND.borrow_ref_mut(cs).take()){match command{GpsCommand::Record=>{cursor=ObservationCursor::new();begin(false)},GpsCommand::Wardrive=>{cursor=ObservationCursor::new();begin(true)},GpsCommand::Stop=>{critical_section::with(|cs|STATE.borrow_ref_mut(cs).recording=false);}}}
+  if let Some(command)=critical_section::with(|cs|COMMAND.borrow_ref_mut(cs).take()){match command{
+   GpsCommand::Record=>{cursor=ObservationCursor::new();track=TrackLog::new();begin(false)},
+   GpsCommand::Wardrive=>{cursor=ObservationCursor::new();track=TrackLog::new();begin(true)},
+   GpsCommand::Stop=>{
+    critical_section::with(|cs|STATE.borrow_ref_mut(cs).recording=false);
+    // Route recording keeps an in-memory copy; stopping exports it as GPX.
+    if !track.is_empty(){
+     let name=sd::next_name("TRK","GPX");
+     let exported=sd::enqueue(&name,track.gpx().into_bytes(),false);
+     message(if exported{"Track exported"}else{"Track export failed: card unavailable"});
+    }
+    track=TrackLog::new();
+   }}}
   let now=Instant::now().as_millis();
   match with_timeout(Duration::from_millis(100),uart.read_async(&mut buffer)).await{Ok(Ok(len))=>{for b in &buffer[..len]{parser.push(*b,now);}},Ok(Err(_))=>{message("GPS read error");Timer::after(Duration::from_millis(100)).await;},Err(_)=>{}}
   let now=Instant::now().as_millis();
   let fresh=parser.fresh_fix(now).cloned();
   critical_section::with(|cs|{let mut s=STATE.borrow_ref_mut(cs);s.seen=parser.sentences()>0;s.valid=fresh.is_some();s.fix=parser.fix().cloned();});
-  if let Some(f)=fresh.as_ref(){history.push(f);if now.saturating_sub(last_record)>=1000{save_fix(f,now,&history,&mut cursor);last_record=now;}}
+  if let Some(f)=fresh.as_ref(){history.push(f);
+   if now.saturating_sub(last_record)>=1000{save_fix(f,now,&history,&mut cursor);last_record=now;}
+   let route=critical_section::with(|cs|{let s=STATE.borrow_ref(cs);s.recording&&!s.wardrive});
+   if route{track.record(f,now);}
+  }
   if now.saturating_sub(last_publish)>=500{
    critical_section::with(|cs|{let mut s=STATE.borrow_ref_mut(cs);let mut lines=Vec::new();
     if let Some(error)=&s.error{lines.push(error.clone());}

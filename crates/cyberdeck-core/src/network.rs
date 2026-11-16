@@ -40,3 +40,7 @@ pub fn service_name(port:u16)->&'static str{match port{22=>"SSH",53=>"DNS",80=>"
 /// One ordinary A query for a reserved invalid name; no external resolver is used.
 pub fn dns_query(id:u16)->Vec<u8>{let mut out=alloc::vec![0u8;12];out[..2].copy_from_slice(&id.to_be_bytes());out[2]=1;out[5]=1;for label in [b"admin12121".as_slice(),b"invalid".as_slice()]{out.push(label.len() as u8);out.extend_from_slice(label);}out.extend_from_slice(&[0,0,1,0,1]);out}
 pub fn dns_response(packet:&[u8],id:u16)->Option<u8>{if packet.len()<12||packet[..2]!=id.to_be_bytes()||packet[2]&0x80==0||packet[2]&0x78!=0||packet[4..6]!=[0,1]{return None;}Some(packet[3]&0x0f)}
+/// LLMNR probe: single-label A query for the deck's own name, sent to the
+/// multicast resolver group (224.0.0.252:5355). Replies reveal hosts that
+/// answer link-local name resolution, which plain DNS probes cannot see.
+pub fn llmnr_query(id:u16)->Vec<u8>{let mut out=alloc::vec![0u8;12];out[..2].copy_from_slice(&id.to_be_bytes());out[2]=1;out[5]=1;out.push(10);out.extend_from_slice(b"admin12121");out.extend_from_slice(&[0,0,1,0,1]);out}

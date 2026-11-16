@@ -199,6 +199,37 @@ impl<'d> Nrf24<'d> {
         self.command(CMD_FLUSH_RX)?;
         Ok(())
     }
+
+    /// Write a 5-byte pipe address in nRF register order.
+    fn write_address(&mut self, register: u8, address: [u8; 5]) -> Result<(), Nrf24Error> {
+        self.csn.set_low();
+        let mut command = [0u8; 6];
+        command[0] = CMD_W_REGISTER | register;
+        command[1..].copy_from_slice(&address);
+        let mut response = [0u8; 6];
+        let result = SpiBus::transfer(&mut *self.spi.borrow_mut(), &mut response, &command).map_err(|_| Nrf24Error::Bus);
+        self.csn.set_high();
+        result
+    }
+
+    /// Promiscuous receive: the two repeating sync addresses from the MouseJack
+    /// research on pipes 0/1 with CRC off, so packets from unknown senders reach
+    /// the FIFO. Byte alignment is best-effort without CRC; the caller filters.
+    pub fn promiscuous_rx(&mut self, rate: DataRate, payload_len: u8) -> Result<(), Nrf24Error> {
+        self.ce.set_low();
+        self.write_register(REG_EN_AA, 0x00)?;
+        self.write_register(REG_EN_RXADDR, 0x03)?;
+        self.write_register(REG_RF_SETUP, rate.rf_setup_bits())?;
+        self.write_register(REG_RX_PW_P0, payload_len.clamp(1, MAX_PAYLOAD))?;
+        self.write_register(REG_RX_PW_P1, payload_len.clamp(1, MAX_PAYLOAD))?;
+        self.write_address(REG_RX_ADDR_P0, cyberdeck_core::rf::capture::MOUSEJACK_ADDRESSES[0])?;
+        self.write_address(REG_RX_ADDR_P1, cyberdeck_core::rf::capture::MOUSEJACK_ADDRESSES[1])?;
+        self.command(CMD_FLUSH_RX)?;
+        // CRC must stay off: an unknown sender's byte alignment can shift it.
+        self.write_register(REG_CONFIG, CONFIG_PWR_UP | CONFIG_PRIM_RX)?;
+        self.ce.set_high();
+        Ok(())
+    }
     pub fn power_down(&mut self) -> Result<(), Nrf24Error> {
         self.ce.set_low();
         self.write_register(REG_CONFIG, CONFIG_EN_CRC | CONFIG_CRCO)?;

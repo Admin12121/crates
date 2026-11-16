@@ -108,6 +108,26 @@ async fn dns_probe(stack:Stack<'static>,address:Ipv4Address,token:u32){
  }
  append(format!("{address}:53 no DNS reply"));
 }
+/// LLMNR name-resolution probe: one multicast query on port 5355. Any reply
+/// reveals a host that answers link-local names (typically Windows machines).
+async fn llmnr_probe(stack:Stack<'static>,token:u32){
+ use embassy_net::udp::{UdpSocket,PacketMetadata};
+ let mut rx_meta=[PacketMetadata::EMPTY;2];let mut tx_meta=[PacketMetadata::EMPTY;2];
+ let mut rx=[0;512];let mut tx=[0;256];
+ let mut socket=UdpSocket::new(stack,&mut rx_meta,&mut rx,&mut tx_meta,&mut tx);
+ if socket.bind(5355).is_err(){append(String::from("LLMNR check skipped: port busy"));return;}
+ let id=(Instant::now().as_micros() as u16)|0x114E;
+ let query=cyberdeck_core::network::llmnr_query(id);
+ let target=(IpAddress::Ipv4(Ipv4Address::new(224,0,0,252)),5355);
+ if !matches!(with_timeout(Duration::from_millis(500),socket.send_to(&query,target)).await,Ok(Ok(()))){append(String::from("LLMNR probe not sent"));return;}
+ let start=Instant::now();let mut reply=[0;512];let mut answers=0u32;
+ while current(token)&&start.elapsed()<Duration::from_millis(900){
+  if let Ok(Ok((len,meta)))=with_timeout(Duration::from_millis(100),socket.recv_from(&mut reply)).await{
+   if len>=12&&reply[..2]==id.to_be_bytes(){answers+=1;append(format!("LLMNR responder at {}",meta.endpoint.addr));}
+  }
+ }
+ if answers==0{append(String::from("No LLMNR responder (normal on many networks)"));}
+}
 fn save_report(){
  let(status,lines,_)=snapshot();if lines.is_empty(){return;}
  let name=super::sd::next_name("NET","TXT");let mut report=format!("Admin12121 network report\n{status}\n");
@@ -146,7 +166,7 @@ pub async fn run(stack:Stack<'static>)->!{
         }
         append(String::from("Quiet devices may be off or blocking"));
        },
-       NetCommand::Probe{host}|NetCommand::Services{host}=>{if let Some(ip)=target(stack,host){status("Checking the chosen device");inspect_host(stack,ip,matches!(command,NetCommand::Services{..}),token).await;if matches!(command,NetCommand::Services{..})&&current(token){dns_probe(stack,ip,token).await;}}else{append(String::from("Pick a device on this network (1-254)"));}},
+       NetCommand::Probe{host}|NetCommand::Services{host}=>{if let Some(ip)=target(stack,host){status("Checking the chosen device");inspect_host(stack,ip,matches!(command,NetCommand::Services{..}),token).await;if matches!(command,NetCommand::Services{..})&&current(token){dns_probe(stack,ip,token).await;llmnr_probe(stack,token).await;}}else{append(String::from("Pick a device on this network (1-254)"));}},
       NetCommand::Stop=>{},
      }
     }

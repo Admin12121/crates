@@ -105,6 +105,8 @@ struct RfRuntime<'d> {
     mode: RfMode,
     spectrum: Spectrum,
     log: NrfLog<24>,
+    stats: cyberdeck_core::rf::session::SessionStats,
+    sweep: Option<Vec<u8>>,
     channel_cursor: usize,
     packets: u32,
 }
@@ -117,6 +119,8 @@ impl<'d> RfRuntime<'d> {
             mode: RfMode::Off,
             spectrum: Spectrum::new(),
             log: NrfLog::new(),
+            stats: cyberdeck_core::rf::session::SessionStats::new(0),
+            sweep: None,
             channel_cursor: 0,
             packets: 0,
         }
@@ -144,12 +148,20 @@ impl<'d> RfRuntime<'d> {
                 }
             }
             RfMode::Capture => {
+                // Channel 0 sweeps the research channel plan one channel per poll.
+                if let Some(channels) = &self.sweep {
+                    if let Some(&channel) = channels.get(self.channel_cursor % channels.len()) {
+                        let _ = radio.set_channel(channel);
+                    }
+                    self.channel_cursor = self.channel_cursor.wrapping_add(1);
+                }
                 let mut buffer = [0u8; cyberdeck_core::rf::nrf24::MAX_PAYLOAD as usize];
                 if let Ok(Some((pipe, len))) = radio.read_packet(&mut buffer) {
                     let payload = &buffer[..usize::from(len)];
                     if cyberdeck_core::rf::capture::plausible_length(len) {
                         self.log
                             .push(NrfPacket::new(radio.channel(), pipe, payload, now_ms));
+                        self.stats.record(radio.channel(), payload);
                         self.packets = self.packets.saturating_add(1);
                     }
                 }
@@ -173,7 +185,7 @@ fn export_findings(tool:Option<Tool>,rf:&RfRuntime<'_>){
         let _=export::save_wifi_hashes(&wifi::passive_hashes());
     }
     if matches!(tool,Some(Tool::BleScan|Tool::BleSpam|Tool::BleGatt)){let(_,devices,frames)=ble::snapshot();let _=export::save_ble_history(&devices,frames,&ble::gatt_snapshot());}
-    if tool==Some(Tool::RfCapture){let _=export::save_rf_capture(&rf.log);}
+    if tool==Some(Tool::RfCapture){let _=export::save_rf_capture(&rf.log);let _=export::save_rf_baseline(&rf.stats.csv(embassy_time::Instant::now().as_millis()));}
 }
 
 /// Rebuild the payload picker from the built-in list plus any scripts on the card.
@@ -546,9 +558,12 @@ async fn main(spawner: Spawner) -> ! {
             if active_tool==Some(Tool::PktAnalyse){packet_lines=wifi::dissect_latest();}
             if active_tool==Some(Tool::WifiKarma){packet_lines=passive.probes.iter().map(|row|row.line()).collect();}
             if active_tool==Some(Tool::RfCapture){
-                let mut packets:Vec<String>=rf.log.iter().map(|packet|packet.render_line(34)).collect();
-                packets.reverse();
-                packet_lines=packets.into_iter().take(16).collect();
+                let mut packets:Vec<String>=rf.stats.lines(now_ms);
+                packets.truncate(2);
+                let mut logged:Vec<String>=rf.log.iter().map(|packet|packet.render_line(34)).collect();
+                logged.reverse();
+                packets.extend(logged.into_iter().take(16));
+                packet_lines=packets;
             }
             let(storage_status,files)=sd::library_snapshot();
             let capture_files=files.iter().enumerate().map(|(i,file)|alloc::format!("{} {} {} B",i+1,file.name,file.bytes)).collect();
@@ -560,7 +575,7 @@ async fn main(spawner: Spawner) -> ! {
                 eapol:passive.eapol,handshakes:passive.handshakes,pmkids:passive.pmkids,
                 portal_clients,portal_requests,
                 probe_ssids:passive.probe_ssids,probe_rows:passive.probes.len() as u32,
-                rf_envelope:rf.envelope(),rf_peak:rf.spectrum.peak_channel().unwrap_or(0),rf_packets:rf.packets,rf_dropped:rf.log.dropped(),
+                rf_envelope:rf.envelope(),rf_waterfall:rf.spectrum.waterfall().iter().flatten().copied().collect(),rf_peak:rf.spectrum.peak_channel().unwrap_or(0),rf_packets:rf.packets,rf_dropped:rf.log.dropped(),
                 ble_status:ble_status.clone(),ble_devices,ble_frames,usb_status:usb_status.clone(),usb_percent,usb_keystrokes,usb_unsupported,
                 buttons:buttons.levels(),probe_lines,message:app.message(),usb_paused:app.usb_paused(),
                 gps_lines:gps::snapshot(),net_lines,packet_lines,result_lines:Vec::new(),usb_preview:preview,capture_files,export_status:if sd::ready(){None}else{Some(sd::status_line())}};

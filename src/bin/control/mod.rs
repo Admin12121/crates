@@ -27,10 +27,11 @@ pub fn start(tool:Tool,app:&mut App,rf:&mut RfRuntime<'_>,flags:Flags)->Result<(
   },
   Tool::WifiHandshake=>{let mut filter=filter;filter.eapol_only=true;queued(wifi::submit(WifiCommand::Observe{channel:s.channel,filter,record:true,respond:false}))},
   Tool::PktStream=>{if !flags.usb{return Err("Plug the USB port into the PC");}queued(wifi::submit(WifiCommand::Stream{channel:s.channel,filter}))},
-  Tool::WifiBeacon|Tool::WifiDeauth|Tool::WifiDisassoc=>{if s.channel==0{return Err("Pick a channel from 1 to 13 (not All)");}
-   let mode=match tool{Tool::WifiBeacon=>cyberdeck_core::wifi::attack::AttackMode::BeaconSpam,Tool::WifiDisassoc=>cyberdeck_core::wifi::attack::AttackMode::Disassoc,_=>cyberdeck_core::wifi::attack::AttackMode::Deauth};
-   // Disconnect tests aim at the selected network; beacon spam rotates its own identity.
-   let target=if tool!=Tool::WifiBeacon{let(_,aps,_,_)=wifi::snapshot();Some(aps.get(usize::from(s.target)).ok_or("Scan Wi-Fi first and pick a network")?.bssid)}else{None};
+  Tool::WifiBeacon|Tool::WifiDeauth|Tool::WifiDisassoc|Tool::WifiAuthFlood|Tool::WifiProbeFlood=>{if s.channel==0{return Err("Pick a channel from 1 to 13 (not All)");}
+   let mode=match tool{Tool::WifiBeacon=>cyberdeck_core::wifi::attack::AttackMode::BeaconSpam,Tool::WifiDisassoc=>cyberdeck_core::wifi::attack::AttackMode::Disassoc,Tool::WifiAuthFlood=>cyberdeck_core::wifi::attack::AttackMode::AuthFlood,Tool::WifiProbeFlood=>cyberdeck_core::wifi::attack::AttackMode::ProbeFlood,_=>cyberdeck_core::wifi::attack::AttackMode::Deauth};
+   // Disconnect tests and the join flood aim at the selected network; beacon
+   // spam and the name flood rotate their own identities.
+   let target=if matches!(tool,Tool::WifiDeauth|Tool::WifiDisassoc|Tool::WifiAuthFlood){let(_,aps,_,_)=wifi::snapshot();Some(aps.get(usize::from(s.target)).ok_or("Scan Wi-Fi first and pick a network")?.bssid)}else{None};
    queued(wifi::submit(WifiCommand::Attack{mode,channel:s.channel,target}))},
   Tool::PktFiles=>{if !sd::ready(){return Err("Insert a card first");}queued(sd::request_list())},
   Tool::BleScan=>{if !flags.ble{return Err("Bluetooth unavailable");}queued(ble::submit(BleCommand::Scan))},
@@ -42,11 +43,19 @@ pub fn start(tool:Tool,app:&mut App,rf:&mut RfRuntime<'_>,flags:Flags)->Result<(
    if wifi::busy()||ble::busy(){return Err("Stop Wi-Fi and Bluetooth first");}
    let Some(radio)=rf.radio.as_mut()else{return Err("Attach an nRF24 radio module");};
    let rate=match s.rf_rate{0=>DataRate::Kbps250,2=>DataRate::Mbps2,_=>DataRate::Mbps1};
-   radio.configure(rate,s.rf_payload_len,[0xE7;5]).map_err(|_|"Radio module problem")?;
-   radio.set_channel(s.channel.min(125)).map_err(|_|"Radio channel problem")?;
-   radio.power_up_rx().map_err(|_|"Radio module did not start")?;
+   // Channel 0 on Radio capture sweeps the research channel plan; 1..125 is fixed.
+   let sweep=if tool==Tool::RfCapture&&s.channel==0{Some(cyberdeck_core::rf::capture::sniff_channels())}else{None};
+   if tool==Tool::RfCapture{
+    // Promiscuous: the MouseJack research sync addresses with CRC off, so
+    // packets from unknown senders reach the FIFO (alignment is best-effort).
+    radio.promiscuous_rx(rate,s.rf_payload_len).map_err(|_|"Radio module problem")?;
+   }else{
+    radio.configure(rate,s.rf_payload_len,[0xE7;5]).map_err(|_|"Radio module problem")?;
+    radio.set_channel(s.channel.min(125)).map_err(|_|"Radio channel problem")?;
+    radio.power_up_rx().map_err(|_|"Radio module did not start")?;
+   }
    rf.delay.delay_micros(1600);
-   rf.spectrum.clear();rf.log=cyberdeck_core::rf::capture::NrfLog::new();rf.packets=0;rf.channel_cursor=0;
+   rf.spectrum.clear();rf.log=cyberdeck_core::rf::capture::NrfLog::new();rf.stats=cyberdeck_core::rf::session::SessionStats::new(embassy_time::Instant::now().as_millis());rf.packets=0;rf.channel_cursor=0;rf.sweep=sweep;
    rf.mode=if tool==Tool::RfSpectrum{RfMode::Spectrum}else{RfMode::Capture};Ok(())
   },
   Tool::GpsStatus=>if flags.gps{Ok(())}else{Err("No GPS on this board")},

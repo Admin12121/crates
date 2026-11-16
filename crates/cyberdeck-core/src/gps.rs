@@ -99,6 +99,9 @@ impl<const N:usize> TrackLog<N>{
  pub fn len(&self)->usize{self.points.len()}pub fn is_empty(&self)->bool{self.points.is_empty()}pub fn dropped(&self)->u32{self.dropped}
  pub fn points(&self)->&[TrackPoint]{&self.points}
  pub fn csv(&self)->String{let mut out=String::from("uptime_ms,utc_date,utc_time,latitude,longitude,altitude_dm,satellites,hdop_centi\n");for p in &self.points{out.push_str(&p.fix.csv_row(p.uptime_ms));}out}
+ /// GPX 1.1 track document, for map tools that prefer it over the CSV rows.
+ /// Points without a valid UTC stamp keep their position but no <time>.
+ pub fn gpx(&self)->String{let mut out=String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<gpx version=\"1.1\" creator=\"Admin12121\" xmlns=\"http://www.topografix.com/GPX/1/1\">\n<trk><name>Admin12121 track</name><trkseg>\n");for point in &self.points{let fix=&point.fix;out.push_str(&format!("<trkpt lat=\"{}\" lon=\"{}\"><ele>{}</ele>",coordinate(fix.latitude_e7),coordinate(fix.longitude_e7),fix.altitude_dm/10));if let Some(time)=utc_datetime(fix){out.push_str(&format!("<time>{}Z</time>",time.replace(' ',"T")));}out.push_str("</trkpt>\n");}out.push_str("</trkseg></trk>\n</gpx>\n");out}
 }
 
 fn valid_clock(time:&str)->bool{if time.len()<6||time.len()>10{return false;}let bytes=time.as_bytes();if !bytes[..6].iter().all(u8::is_ascii_digit){return false;}if bytes.len()>6&&(bytes[6]!=b'.'||bytes.len()==7||!bytes[7..].iter().all(u8::is_ascii_digit)){return false;}let hour=(bytes[0]-b'0')*10+bytes[1]-b'0';let minute=(bytes[2]-b'0')*10+bytes[3]-b'0';let second=(bytes[4]-b'0')*10+bytes[5]-b'0';hour<24&&minute<60&&(second<60||(hour==23&&minute==59&&second==60))}

@@ -85,6 +85,15 @@ pub fn save_rf_capture(log: &NrfLog<24>) -> bool {
     sd::enqueue(&name, log.to_csv().into_bytes(), false)
 }
 
+/// G05: per-channel session baseline from the core session statistics.
+pub fn save_rf_baseline(csv: &str) -> bool {
+    if csv.is_empty() {
+        return false;
+    }
+    let name = sd::next_name("BASE", "CSV");
+    sd::enqueue(&name, csv.as_bytes().to_vec(), false)
+}
+
 fn csv_field(value: &str) -> String {
     if value.contains(',') || value.contains('"') {
         let mut out = String::from("\"");

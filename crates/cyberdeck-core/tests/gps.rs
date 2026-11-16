@@ -7,6 +7,7 @@ fn feed(g:&mut Nmea,body:&str,now:u64){let sum=body.bytes().fold(0,|s,b|s^b);for
 #[test]fn oversized_input_resynchronizes(){let mut g=Nmea::new();g.push(b'$',0);for _ in 0..400{g.push(b'A',0);}feed(&mut g,"GPRMC,123519,A,4807.038,N,01131.000,E,0,0,230394",100);assert!(g.fix().is_some());assert!(g.malformed()>0);}
 #[test]fn impossible_coordinates_rejected(){let mut g=Nmea::new();feed(&mut g,"GPRMC,123519,A,9961.000,N,18100.000,E,0,0,230394",1);assert!(g.fix().is_none());}
 #[test]fn bounded_track_exports_csv(){let mut l=TrackLog::<2>::new();for n in 0..3{l.record(&Fix::default(),n);}assert_eq!(l.len(),2);assert_eq!(l.dropped(),1);assert_eq!(l.csv().lines().count(),3);}
+#[test]fn track_log_exports_valid_gpx(){let mut l=TrackLog::<8>::new();l.record(&Fix{latitude_e7:277172000,longitude_e7:853240000,altitude_dm:134,utc_date:"161126".into(),utc_time:"123519".into(),..Fix::default()},1000);let gpx=l.gpx();assert!(gpx.starts_with("<?xml"));assert!(gpx.contains("<trkpt lat=\"27.7172000\" lon=\"85.3240000\"><ele>13</ele>"));assert!(gpx.contains("<time>2026-11-16T12:35:19Z</time>"));assert!(gpx.contains("</gpx>"));}
 #[test]fn geofence_checks_position(){let f=Fix{latitude_e7:270000000,longitude_e7:850000000,..Fix::default()};assert!(geofence_contains(&f,270000000,850000000,100));assert!(!geofence_contains(&f,271000000,850000000,100));}
 
 #[test]fn impossible_clock_and_date_are_rejected(){let mut g=Nmea::new();feed(&mut g,"GPRMC,996199,A,4807.038,N,01131.000,E,0,0,321399",1);assert!(g.fresh_fix(1).is_none());}

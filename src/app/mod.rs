@@ -19,7 +19,7 @@ impl Group {
     }
     pub const fn tools(self)->&'static [Tool] {
         match self {
-            Self::Wifi=>&[Tool::WifiScan,Tool::WifiCapture,Tool::WifiHandshake,Tool::WifiWps,Tool::WifiClients,Tool::WifiEvilTwin,Tool::WifiKarma,Tool::WifiBeacon,Tool::WifiDeauth,Tool::WifiDisassoc],
+            Self::Wifi=>&[Tool::WifiScan,Tool::WifiCapture,Tool::WifiHandshake,Tool::WifiWps,Tool::WifiClients,Tool::WifiEvilTwin,Tool::WifiKarma,Tool::WifiBeacon,Tool::WifiDeauth,Tool::WifiDisassoc,Tool::WifiAuthFlood,Tool::WifiProbeFlood],
             Self::Packet=>&[Tool::PktCapture,Tool::PktAnalyse,Tool::PktFiles,Tool::PktStream],
             Self::Ble=>&[Tool::BleScan,Tool::BleSpam,Tool::BleGatt,Tool::BleHid],
             Self::UsbHid=>&[Tool::HidIntro,Tool::HidDucky],
@@ -32,7 +32,7 @@ impl Group {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
-    WifiScan, WifiCapture, WifiBeacon, WifiDeauth, WifiDisassoc, WifiHandshake, WifiWps, WifiClients, WifiEvilTwin, WifiKarma,
+    WifiScan, WifiCapture, WifiBeacon, WifiDeauth, WifiDisassoc, WifiAuthFlood, WifiProbeFlood, WifiHandshake, WifiWps, WifiClients, WifiEvilTwin, WifiKarma,
     PktCapture, PktAnalyse, PktFiles, PktStream,
     BleScan, BleSpam, BleGatt, BleHid, HidIntro, HidDucky,
     RfSpectrum, RfCapture, GpsStatus, GpsRecord, GpsWardrive,
@@ -41,7 +41,7 @@ pub enum Tool {
 impl Tool {
     pub const fn title(self)->&'static str {
         match self {
-            Self::WifiScan=>"Scan Wi-Fi",Self::WifiCapture=>"Record Wi-Fi",Self::WifiBeacon=>"Fake networks",Self::WifiDeauth=>"Disconnect test",Self::WifiDisassoc=>"Soft disconnect",
+            Self::WifiScan=>"Scan Wi-Fi",Self::WifiCapture=>"Record Wi-Fi",Self::WifiBeacon=>"Fake networks",Self::WifiDeauth=>"Disconnect test",Self::WifiDisassoc=>"Soft disconnect",Self::WifiAuthFlood=>"Join flood",Self::WifiProbeFlood=>"Name flood",
             Self::WifiHandshake=>"Password capture",Self::WifiWps=>"WPS info",Self::WifiClients=>"Nearby devices",
             Self::WifiEvilTwin=>"Evil twin",Self::WifiKarma=>"Name requests",
             Self::PktCapture=>"Live capture",Self::PktAnalyse=>"Packet details",Self::PktFiles=>"Saved captures",Self::PktStream=>"Stream to PC",
@@ -53,7 +53,7 @@ impl Tool {
     }
     pub const fn group(self)->Group {
         match self {
-            Self::WifiScan|Self::WifiCapture|Self::WifiBeacon|Self::WifiDeauth|Self::WifiDisassoc|Self::WifiHandshake|Self::WifiWps|Self::WifiClients|Self::WifiEvilTwin|Self::WifiKarma=>Group::Wifi,
+            Self::WifiScan|Self::WifiCapture|Self::WifiBeacon|Self::WifiDeauth|Self::WifiDisassoc|Self::WifiAuthFlood|Self::WifiProbeFlood|Self::WifiHandshake|Self::WifiWps|Self::WifiClients|Self::WifiEvilTwin|Self::WifiKarma=>Group::Wifi,
             Self::PktCapture|Self::PktAnalyse|Self::PktFiles|Self::PktStream=>Group::Packet,
             Self::BleScan|Self::BleSpam|Self::BleGatt|Self::BleHid=>Group::Ble,
             Self::HidIntro|Self::HidDucky=>Group::UsbHid,Self::RfSpectrum|Self::RfCapture=>Group::Rf,
@@ -99,7 +99,7 @@ pub struct Live {
     pub portal_clients:u32,pub portal_requests:u32,
     /// Karma view: distinct requested SSIDs and the station count behind them.
     pub probe_ssids:u32,pub probe_rows:u32,
-    pub rf_envelope:Vec<u8>,pub rf_peak:u8,pub rf_packets:u32,pub rf_dropped:u32,
+    pub rf_envelope:Vec<u8>,pub rf_waterfall:Vec<u8>,pub rf_peak:u8,pub rf_packets:u32,pub rf_dropped:u32,
     pub ble_status:String,pub ble_devices:Vec<BleDevice>,pub ble_frames:u32,
     pub usb_status:String,pub usb_percent:u8,pub usb_keystrokes:u32,pub usb_unsupported:u32,pub usb_paused:bool,
     pub buttons:[bool;5],pub probe_lines:Vec<String>,pub message:Option<String>,
@@ -116,7 +116,7 @@ impl Live {
         self.portal_clients==other.portal_clients&&self.portal_requests==other.portal_requests&&
         self.probe_ssids==other.probe_ssids&&self.probe_rows==other.probe_rows&&
         self.ble_status==other.ble_status&&self.ble_frames==other.ble_frames&&
-        self.rf_envelope==other.rf_envelope&&self.rf_peak==other.rf_peak&&self.rf_packets==other.rf_packets&&self.rf_dropped==other.rf_dropped&&
+        self.rf_envelope==other.rf_envelope&&self.rf_waterfall==other.rf_waterfall&&self.rf_peak==other.rf_peak&&self.rf_packets==other.rf_packets&&self.rf_dropped==other.rf_dropped&&
         self.usb_status==other.usb_status&&self.usb_percent==other.usb_percent&&self.usb_keystrokes==other.usb_keystrokes&&self.usb_unsupported==other.usb_unsupported&&self.usb_paused==other.usb_paused&&
         self.gps_lines==other.gps_lines&&self.net_lines==other.net_lines&&self.packet_lines==other.packet_lines&&self.result_lines==other.result_lines&&self.usb_preview==other.usb_preview&&self.capture_files==other.capture_files&&self.export_status==other.export_status&&self.message==other.message
     }
@@ -208,7 +208,7 @@ impl App {
             Tool::WifiEvilTwin=>fields.extend([Field::Channel,Field::Ssid]),
             Tool::WifiKarma=>fields.push(Field::Channel),
             Tool::WifiDeauth|Tool::WifiDisassoc=>fields.extend([Field::Channel,Field::Target]),
-            Tool::WifiBeacon=>fields.push(Field::Channel),
+            Tool::WifiBeacon|Tool::WifiAuthFlood|Tool::WifiProbeFlood=>fields.push(Field::Channel),
             Tool::PktStream=>fields.extend([Field::Channel,Field::Filter,Field::Stream]),
             Tool::PktFiles=>fields.extend([Field::Target,Field::FileRecover]),
             Tool::BleScan|Tool::BleGatt=>fields.push(Field::Target),
@@ -418,6 +418,7 @@ impl App {
             Tool::WifiHandshake=>Some((format!("{}",live.handshakes),plural(live.handshakes as usize,"LOGIN","LOGINS"),format!("{} KEYS",live.pmkids))),
             Tool::WifiEvilTwin=>Some((format!("{}",live.portal_clients),String::from("JOINED"),format!("{} VISITS",live.portal_requests))),
             Tool::WifiKarma=>Some((format!("{}",live.probe_ssids),plural(live.probe_ssids as usize,"NAME","NAMES"),format!("{} DEVICES",live.probe_rows))),
+            Tool::WifiAuthFlood|Tool::WifiProbeFlood=>Some((format!("{}",live.wifi_frames),String::from("SENT"),String::new())),
             Tool::WifiCapture|Tool::WifiWps|Tool::WifiClients|Tool::PktCapture|Tool::PktAnalyse=>
                 Some((format!("{}",live.wifi_frames),plural(live.wifi_frames as usize,"PACKET","PACKETS"),format!("{} MISSED",live.wifi_dropped))),
             Tool::BleScan=>Some((format!("{}",live.ble_devices.len()),plural(live.ble_devices.len(),"DEVICE","DEVICES"),format!("{} SIGNALS",live.ble_frames))),
@@ -585,6 +586,22 @@ impl App {
                     }
                     canvas.draw_hline(10,baseline+1,width,theme::SURFACE_ALT);
                     top=baseline+10;
+                }
+                // Waterfall: the four most recent sweeps, oldest at the top, as
+                // one small cell each — a history of where activity has been.
+                if tool==Tool::RfSpectrum&&!live.rf_waterfall.is_empty()&&live.rf_waterfall.len()%64==0&&self.bottom(canvas)>top+26 {
+                    let rows=(live.rf_waterfall.len()/64) as u16;
+                    let cell=(canvas.width().saturating_sub(24)/64).max(2);
+                    for row in 0..rows {
+                        let y=top+(row as i16)*((cell as i16)+1);
+                        for column in 0..64usize {
+                            let value=live.rf_waterfall[row as usize*64+column];
+                            if value<8 {continue;}
+                            let color=if value>=64 {theme::ACCENT}else if value>=32 {theme::TEXT}else{theme::TEXT_DIM};
+                            canvas.fill_rect(Rect::new(10+(column as u16*cell) as i16,y,cell,cell),color);
+                        }
+                    }
+                    top+=(rows as i16)*((cell as i16)+1)+6;
                 }
                 self.render_lines(canvas,&self.lines(tool,live),top,self.scroll);
             },
