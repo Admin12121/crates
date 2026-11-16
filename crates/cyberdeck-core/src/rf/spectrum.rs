@@ -145,8 +145,8 @@ impl Spectrum {
     /// Waterfall history rows (oldest first), 64 columns each.
     pub fn waterfall(&self) -> [[u8; 64]; 4] {
         let mut rows = [[0u8; 64]; 4];
-        for i in 0..4 {
-            rows[i] = self.waterfall[(self.waterfall_row + 1 + i) % 4];
+        for (i, row) in rows.iter_mut().enumerate() {
+            *row = self.waterfall[(self.waterfall_row + 1 + i) % 4];
         }
         rows
     }

@@ -63,7 +63,10 @@ pub fn start(tool:Tool,app:&mut App,rf:&mut RfRuntime<'_>,flags:Flags)->Result<(
    if !flags.gps{return Err("Connect a GPS receiver");}
    if gps::fix().is_none(){return Err("No location yet. Wait for a fix");}
    if !sd::ready(){return Err("Insert a card first");}
-   if tool==Tool::GpsWardrive{if flags.wifi{wifi::submit(WifiCommand::Scan);}if flags.ble{ble::submit(BleCommand::Scan);}}
+   if tool==Tool::GpsWardrive{
+   if flags.wifi{wifi::submit(WifiCommand::Scan);}
+   if flags.ble{ble::submit(BleCommand::Scan);}
+  }
    queued(gps::submit(if tool==Tool::GpsWardrive{GpsCommand::Wardrive}else{GpsCommand::Record}))
   },
   Tool::NetInfo|Tool::NetDiscover|Tool::NetProbe|Tool::NetServices=>{

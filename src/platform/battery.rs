@@ -58,15 +58,19 @@ fn snapshot() -> Option<(u16, u8)> {
     })
 }
 
-/// One diagnostics line, e.g. `BAT 3.92 V 62%`.
+/// One diagnostics line, e.g. `BAT 3.92 V 62%`; below 10% it says LOW.
 pub fn status_line() -> String {
     match snapshot() {
-        Some((millivolts, percent)) => alloc::format!(
-            "BAT {}.{:02} V {}%",
-            millivolts / 1000,
-            (millivolts % 1000) / 10,
-            percent
-        ),
+        Some((millivolts, percent)) => {
+            let warning = if percent <= 10 { " LOW" } else { "" };
+            alloc::format!(
+                "BAT {}.{:02} V {}%{}",
+                millivolts / 1000,
+                (millivolts % 1000) / 10,
+                percent,
+                warning
+            )
+        }
         None => String::from("BAT: no reading"),
     }
 }

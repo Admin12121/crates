@@ -143,11 +143,8 @@ impl HidEngine {
     pub fn progress(&self) -> EngineProgress {
         let total = self.command_total;
         let index = self.command_index.min(total);
-        let percent = if total == 0 {
-            100
-        } else {
-            (index * 100 / total) as u8
-        };
+        let percent = index.checked_mul(100).and_then(|scaled| scaled.checked_div(total))
+            .map_or(100, |value| value.min(100) as u8);
         EngineProgress {
             command_index: index,
             command_total: total,

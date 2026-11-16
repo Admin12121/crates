@@ -110,7 +110,7 @@ impl<'a> Iterator for AdStructures<'a> {
     type Item = AdStructure<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.rest.len() >= 2 {
+        if self.rest.len() >= 2 {
             let len = self.rest[0] as usize;
             if len == 0 {
                 self.rest = &[];
@@ -300,11 +300,10 @@ impl AdvReport {
                     service_data = Some(structure.data.to_vec());
                 }
                 AD_UUID16_COMPLETE | AD_UUID16_INCOMPLETE => {
-                    let mut chunks = structure.data.chunks_exact(2);
-                    for chunk in &mut chunks {
-                        if uuids.len() < 8 {
-                            uuids.push(ServiceUuid(u16::from_le_bytes([chunk[0], chunk[1]])));
-                        }
+                    let (pairs, _) = structure.data.as_chunks::<2>();
+                    for chunk in pairs {
+                        if uuids.len() >= 8 {break;}
+                        uuids.push(ServiceUuid(u16::from_le_bytes([chunk[0], chunk[1]])));
                     }
                 }
                 AD_TX_POWER if !structure.data.is_empty() => {

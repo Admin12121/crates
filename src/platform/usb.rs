@@ -361,8 +361,12 @@ async fn cdc_receive<'d,D:Driver<'d>>(mut receiver:Receiver<'d,D>)->! {
 pub async fn run(usb:esp_hal::usb::otg::Usb<'static>)->! {
     let mut ep_out_buffer=[0;256];
     let driver=esp_hal::usb::otg::embassy_usb_device::Driver::new(usb,&mut ep_out_buffer,esp_hal::usb::otg::embassy_usb_device::Config::default());
-    let mut config=UsbConfig::new(0x303A,0x4004);
-    config.manufacturer=Some("Admin12121");config.product=Some("Admin12121 HID + PCAP");config.serial_number=Some("ADMIN12121-0001");
+    // The KEYBOARD_CDC profile is what this build enumerates (HID keyboard +
+    // mouse + consumer, CDC console/streaming). Switching identities mid-run
+    // would need re-enumeration, which embassy-usb cannot do after build().
+    let profile=cyberdeck_core::hid::UsbProfile::HID_CDC;
+    let mut config=UsbConfig::new(profile.vendor_id,profile.product_id);
+    config.manufacturer=Some(profile.manufacturer);config.product=Some(profile.product);config.serial_number=Some(profile.serial);
     config.max_power=100;config.max_packet_size_0=64;
     // Composite IAD class values required by Windows for CDC alongside HID.
     config.device_class=0xEF;config.device_sub_class=0x02;config.device_protocol=0x01;config.composite_with_iads=true;

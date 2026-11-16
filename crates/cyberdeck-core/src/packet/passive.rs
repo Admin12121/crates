@@ -19,6 +19,9 @@ impl LatestFrame {
     }
     pub fn bytes(&self)->&[u8] {&self.data[..usize::from(self.len)]}
 }
+impl Default for LatestFrame {
+    fn default()->Self {Self::new()}
+}
 #[derive(Clone,Debug)]
 pub struct WpsObservation {pub bssid:MacAddr,pub info:WpsInfo,pub channel:u8,pub rssi:i8}
 /// One station asking for one SSID (the Karma view).
@@ -58,14 +61,14 @@ impl<const A:usize,const S:usize,const H:usize,const R:usize> PassiveEngine<A,S,
                 // Karma view: which station is asking for which SSID (empty = wildcard).
                 self.note_probe(header.addr2,frame::find_ssid(header.ies()).unwrap_or(&[]),channel,rssi);
             }
-            if header.fc.is_data() && !header.fc.protected && !(header.fc.to_ds && header.fc.from_ds) {
-                if let Some(eapol)=crate::wifi::ap::eapol_payload(header.body) {
+            if header.fc.is_data() && !header.fc.protected && !(header.fc.to_ds && header.fc.from_ds)
+                && let Some(eapol)=crate::wifi::ap::eapol_payload(header.body)
+            {
                     let (ap,client)=if header.fc.to_ds {(header.addr1,header.addr2)}
                         else if header.fc.from_ds {(header.addr2,header.addr1)}
                         else {(header.addr3,header.addr2)};
                     let ssid=self.scan.aps.get(ap).map(|a|a.ssid.as_bytes());
                     self.handshakes.on_eapol(eapol,ap,client,ssid,channel,ts_us/1000);
-                }
             }
         }
         if !filter.matches(data) {return observation}
@@ -154,8 +157,8 @@ mod tests {
         let beacon=frame::beacon_frame(b"AdminLab",ap,&frame::BeaconOptions::default());
         engine.on_frame(beacon.as_slice(),-40,1,1234567,&super::super::CaptureFilter::default(),beacon.as_slice().len() as u32);
         let mut kde=PMKID_KDE_PREFIX.to_vec();kde.extend_from_slice(&[0xaa;16]);
-        let m1=build_eapol_key(DESCRIPTOR_RSN,KEY_INFO_ACK,1,&[1;32],&kde);
-        let m2=build_eapol_key(DESCRIPTOR_RSN,KEY_INFO_MIC,1,&[2;32],&[]);
+        let m1=build_eapol_key(DESCRIPTOR_RSN,KEY_INFO_ACK|KEY_INFO_KEY_TYPE,1,&[1;32],&kde);
+        let m2=build_eapol_key(DESCRIPTOR_RSN,KEY_INFO_MIC|KEY_INFO_KEY_TYPE,1,&[2;32],&[]);
         for (index,key) in [m1,m2].into_iter().enumerate() {
             let mut data=alloc::vec![0x08,1,0,0];data.extend_from_slice(ap.as_bytes());data.extend_from_slice(client.as_bytes());data.extend_from_slice(ap.as_bytes());data.extend_from_slice(&[0;2]);
             data.extend_from_slice(&[0xaa,0xaa,3,0,0,0,0x88,0x8e]);data.extend_from_slice(&key);

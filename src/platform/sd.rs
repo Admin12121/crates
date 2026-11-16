@@ -25,7 +25,7 @@ impl ErrorType for SdBus<'_>{type Error=SpiError;}
 /// trailing read-only bytes are clocked separately, which is what an SD data-in
 /// phase expects.
 fn full_duplex(spi:&mut Spi<'_,Blocking>,read:&mut[u8],write:&[u8])->Result<(),SpiError>{
-    const CHUNK:usize=32;
+    const CHUNK:usize=128;
     let mut staged=[0u8;CHUNK];
     let shared=read.len().min(write.len());
     let mut index=0;
@@ -63,8 +63,10 @@ pub struct Job{pub ticket:u32,pub name:String,pub append:bool,pub bytes:Vec<u8>}
 enum Request{Write(Job),List,Preview(String),Recover(String),Payloads}
 static STATE:Mutex<RefCell<StorageState>>=Mutex::new(RefCell::new(StorageState::new()));
 static JOBS:Mutex<RefCell<VecDeque<Request>>>=Mutex::new(RefCell::new(VecDeque::new()));
+/// One payload-scan batch: script name plus its text.
+type ScannedPayloads=Option<Vec<(String,String)>>;
 /// Scanned HID payload scripts, handed to `platform::payload` exactly once.
-static SCANNED:Mutex<RefCell<Option<Vec<(String,String)>>>>=Mutex::new(RefCell::new(None));
+static SCANNED:Mutex<RefCell<ScannedPayloads>>=Mutex::new(RefCell::new(None));
 static NEXT:Mutex<RefCell<u32>>=Mutex::new(RefCell::new(0));
 static TICKET:Mutex<RefCell<u32>>=Mutex::new(RefCell::new(0));
 fn publish(status:&str,mounted:bool){critical_section::with(|cs|{let mut s=STATE.borrow_ref_mut(cs);s.mounted=mounted;s.status=String::from(status);});}
@@ -226,7 +228,7 @@ fn scan_payloads<D:embedded_sdmmc::BlockDevice>(m:&Manager<D>,v:embedded_sdmmc::
     let mut scripts=Vec::new();
     if scanned.is_ok(){
         for name in names{
-            if let Ok(text)=read_payload(m,hid,&name){if !text.is_empty(){scripts.push((name,text));}}
+            if let Ok(text)=read_payload(m,hid,&name)&& !text.is_empty(){scripts.push((name,text));}
         }
     }
     let closed_hid=m.close_dir(hid).map_err(|_|"directory close failed");
@@ -242,8 +244,8 @@ pub async fn run(bus:SdBus<'static>)->!{
     };
     loop{
         let request=critical_section::with(|cs|JOBS.borrow_ref_mut(cs).pop_front());
-        if let Some(request)=request{
-            if let Some(v)=volume{match request{
+        if let Some(request)=request
+            && let Some(v)=volume{match request{
                 Request::Write(job)=>{
                     let result=write_job(&manager,v,&job).await;
                     critical_section::with(|cs|{
@@ -263,7 +265,6 @@ pub async fn run(bus:SdBus<'static>)->!{
                     Err(e)=>publish(e,false),
                 },
             }}
-        }
         embassy_time::Timer::after(embassy_time::Duration::from_millis(5)).await;
     }
 }

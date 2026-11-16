@@ -341,8 +341,14 @@ async fn hid_listen(stack:&BleStack<'_>,token:u32,payload:u8,layout:Layout)->Res
         while current(token) {
             let next=critical_section::with(|cs|HID_PAYLOAD.borrow_ref_mut(cs).take());
             if let Some((index,layout))=next {
-                if !conn.raw().security_level().map(|level|level.encrypted()).unwrap_or(false) {set_status("Pair first, then press Start");continue;}
-                if !reports.keyboard.should_notify(&conn) {set_status("Waiting for the host to listen");continue;}
+                // Gate failures re-queue the payload so the queued script still
+                // runs once the host pairs and subscribes.
+                let gate_ok=conn.raw().security_level().map(|level|level.encrypted()).unwrap_or(false)
+                    && reports.keyboard.should_notify(&conn);
+                if !gate_ok {
+                    if current(token) {set_status(if reports.keyboard.should_notify(&conn){"Pair first, then press Start"}else{"Waiting for the host to listen"});critical_section::with(|cs|*HID_PAYLOAD.borrow_ref_mut(cs)=Some((index,layout)));}
+                    continue;
+                }
                 // Same resolver as USB: built-in scripts first, then card scripts.
                 let Some((name,source))=super::payload::resolve(index) else {set_status("Unknown script");continue;};
                 let script=cyberdeck_core::hid::ducky::parse(&name,&source).map_err(|_|"Script could not be read")?;
@@ -350,12 +356,17 @@ async fn hid_listen(stack:&BleStack<'_>,token:u32,payload:u8,layout:Layout)->Res
                 while !engine.is_finished() {
                     if !current(token){engine.stop();}
                     let paused=HID_PAUSED.load(Ordering::Acquire);
-                    if paused && !paused_before {with_timeout(Duration::from_millis(500),hid_output(&reports,&conn,Output::ReleaseAll)).await.map_err(|_|"Pause timed out")??;}
+                    if paused && !paused_before && with_timeout(Duration::from_millis(500),hid_output(&reports,&conn,Output::ReleaseAll)).await.is_err() {set_status("Pause timed out; retry");continue;}
                     paused_before=paused;engine.set_paused(paused);
                     if let Some(output)=engine.next_report(Instant::now().as_millis()) {
                         let subscribed=match output {Output::Consumer(_)=>reports.consumer.should_notify(&conn),Output::Mouse(_)=>reports.mouse.should_notify(&conn),_=>reports.keyboard.should_notify(&conn)};
                         if !subscribed {return Err("Waiting for the host to listen");}
-                        with_timeout(Duration::from_millis(500),hid_output(&reports,&conn,output)).await.map_err(|_|"Keystroke timed out")??;
+                        // A single report timeout must not tear the session down
+                        // with keys held; release best-effort, then end the payload.
+                        if with_timeout(Duration::from_millis(500),hid_output(&reports,&conn,output)).await.is_err() {
+                            let _=with_timeout(Duration::from_millis(500),hid_output(&reports,&conn,Output::ReleaseAll)).await;
+                            return Err("Keystroke timed out; keys released");
+                        }
                     }
                     let progress=engine.progress();
                     critical_section::with(|cs|*HID_PROGRESS.borrow_ref_mut(cs)=(progress.percent,engine.keystrokes(),engine.unsupported_chars()));
@@ -367,7 +378,7 @@ async fn hid_listen(stack:&BleStack<'_>,token:u32,payload:u8,layout:Layout)->Res
             }
             Timer::after(Duration::from_millis(10)).await;
         }
-        with_timeout(Duration::from_millis(500),hid_output(&reports,&conn,Output::ReleaseAll)).await.map_err(|_|"Release timed out")??;
+        if with_timeout(Duration::from_millis(500),hid_output(&reports,&conn,Output::ReleaseAll)).await.is_err() {set_status("Release timed out");}else{set_status(if current(token){"Sent. Press Start to repeat"}else{"Stopped. Keys released"});}
         Ok(())
     };
     let result=match select(events,payloads).await {Either::First(result)|Either::Second(result)=>result};

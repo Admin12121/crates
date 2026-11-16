@@ -84,7 +84,7 @@ impl<'a, 'd> PixelSink<'a, 'd> {
         if self.used == 0 {
             return true;
         }
-        let ok = SpiBus::write(self.spi, &mut self.chunk[..self.used]).is_ok();
+        let ok = SpiBus::write(self.spi, &self.chunk[..self.used]).is_ok();
         self.used = 0;
         ok
     }
@@ -113,6 +113,7 @@ impl<'a, 'd> PixelSink<'a, 'd> {
 impl<'d> Display<'d> {
     /// Initialise the panel. `main` builds the SPI bus and GPIOs from the board
     /// profile; the driver never looks at a pin number itself.
+    #[allow(clippy::too_many_arguments, reason = "one argument per wired display pin, driven by the board profile")]
     pub fn new(
         spi: Spi<'d, Blocking>,
         dc: Output<'d>,
@@ -191,14 +192,14 @@ impl<'d> Display<'d> {
     /// Same as [`Self::command`] but leaves chip-select asserted by the caller.
     fn command_held(&mut self, cmd: u8, data: &[u8]) -> Result<(), DisplayError> {
         self.dc.set_low();
-        let mut byte = [cmd];
-        SpiBus::write(&mut self.spi, &mut byte).map_err(|_| DisplayError::BusWrite)?;
+        let byte = [cmd];
+        SpiBus::write(&mut self.spi, &byte).map_err(|_| DisplayError::BusWrite)?;
         self.dc.set_high();
         if !data.is_empty() {
             let mut scratch = [0u8; 32];
             for chunk in data.chunks(scratch.len()) {
                 scratch[..chunk.len()].copy_from_slice(chunk);
-                SpiBus::write(&mut self.spi, &mut scratch[..chunk.len()])
+                SpiBus::write(&mut self.spi, &scratch[..chunk.len()])
                     .map_err(|_| DisplayError::BusWrite)?;
             }
         }
@@ -295,7 +296,7 @@ impl Canvas for Display<'_> {
                         }
                     }
                 }
-                if SpiBus::write(&mut self.spi, &mut row[..offset]).is_err() {
+                if SpiBus::write(&mut self.spi, &row[..offset]).is_err() {
                     self.cs.set_high();
                     return;
                 }

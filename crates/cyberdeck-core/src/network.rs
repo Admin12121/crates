@@ -29,7 +29,7 @@ impl ProbePlan{
   if prefix>=31{return Some(Self{addresses});}
   for offset in u32::from(start.max(1))..u32::from(start.max(1))+u32::from(count.min(16)){
    let Some(ip)=network.checked_add(offset)else{break;};
-   if ip>=broadcast{break;}if ip!=own{addresses.push(ip.to_be_bytes());}
+   if ip>=broadcast{break;}else if ip!=own{addresses.push(ip.to_be_bytes());}
   }Some(Self{addresses})
  }
  pub fn addresses(&self)->&[[u8;4]]{&self.addresses}

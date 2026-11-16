@@ -1,4 +1,10 @@
 //! Ordinary, bounded local-network diagnostics on the station interface.
+//!
+//! Named SDK limitations (not silent omissions): smoltcp exposes no ARP
+//! request/table API, so ARP probing is impossible on this stack; embassy-net
+//! offers no DHCP-client control (release/renew/rogue-server detection), so
+//! DHCP-resilience assessment cannot be implemented here. Both stay listed as
+//! stack limitations in the feature tracker.
 use alloc::{format,string::String,vec::Vec};
 use core::cell::RefCell;
 use critical_section::Mutex;
@@ -17,7 +23,7 @@ pub fn ready()->bool{critical_section::with(|cs|STATE.borrow_ref(cs).ready)}
 pub fn snapshot()->(String,Vec<String>,bool){critical_section::with(|cs|{let s=STATE.borrow_ref(cs);(s.status.clone(),s.lines.clone(),s.busy)})}
 async fn configured(stack:Stack<'static>,token:u32)->bool{
  let start=Instant::now();
- while !stack.is_config_up(){if !current(token){return false;}if start.elapsed()>Duration::from_secs(30){status("No address. Join a Wi-Fi network first");return false;}Timer::after(Duration::from_millis(50)).await;}true
+ while !stack.is_config_up(){if !current(token){return false;}else if start.elapsed()>Duration::from_secs(30){status("No address. Join a Wi-Fi network first");return false;}Timer::after(Duration::from_millis(50)).await;}true
 }
 fn target(stack:Stack<'static>,host:u8)->Option<Ipv4Address>{
  let cfg=stack.config_v4()?;let local=cfg.address.address().octets();let mut ip=local;
@@ -67,7 +73,7 @@ async fn connect(socket:&mut TcpSocket<'_>,address:Ipv4Address,port:u16,token:u3
    embassy_futures::select::Either::First(Err(_))=>return Probe::TimedOut,
    embassy_futures::select::Either::Second(_)=>{}
   }
-  if !current(token){return Probe::Cancelled;}if started.elapsed()>=Duration::from_millis(650){return Probe::TimedOut;}
+  if !current(token){return Probe::Cancelled;}else if started.elapsed()>=Duration::from_millis(650){return Probe::TimedOut;}
  }
 }
 async fn inspect_host(stack:Stack<'static>,address:Ipv4Address,banners:bool,token:u32){
@@ -102,9 +108,8 @@ async fn dns_probe(stack:Stack<'static>,address:Ipv4Address,token:u32){
  if !matches!(with_timeout(Duration::from_millis(500),socket.send_to(&request,(IpAddress::Ipv4(address),53))).await,Ok(Ok(()))){append(String::from("DNS check failed"));return;}
  let start=Instant::now();let mut response=[0;512];
  while current(token)&&start.elapsed()<Duration::from_millis(1500){
-  if let Ok(Ok((len,meta)))=with_timeout(Duration::from_millis(100),socket.recv_from(&mut response)).await{
-   if meta.endpoint.addr==IpAddress::Ipv4(address)&&meta.endpoint.port==53{if let Some(rcode)=cyberdeck_core::network::dns_response(&response[..len],id){append(format!("DNS replied (code {rcode})"));return;}}
-  }
+  if let Ok(Ok((len,meta)))=with_timeout(Duration::from_millis(100),socket.recv_from(&mut response)).await
+   && meta.endpoint.addr==IpAddress::Ipv4(address)&&meta.endpoint.port==53&& let Some(rcode)=cyberdeck_core::network::dns_response(&response[..len],id){append(format!("DNS replied (code {rcode})"));return;}
  }
  append(format!("{address}:53 no DNS reply"));
 }
@@ -122,9 +127,8 @@ async fn llmnr_probe(stack:Stack<'static>,token:u32){
  if !matches!(with_timeout(Duration::from_millis(500),socket.send_to(&query,target)).await,Ok(Ok(()))){append(String::from("LLMNR probe not sent"));return;}
  let start=Instant::now();let mut reply=[0;512];let mut answers=0u32;
  while current(token)&&start.elapsed()<Duration::from_millis(900){
-  if let Ok(Ok((len,meta)))=with_timeout(Duration::from_millis(100),socket.recv_from(&mut reply)).await{
-   if len>=12&&reply[..2]==id.to_be_bytes(){answers+=1;append(format!("LLMNR responder at {}",meta.endpoint.addr));}
-  }
+  if let Ok(Ok((len,meta)))=with_timeout(Duration::from_millis(100),socket.recv_from(&mut reply)).await
+   && len>=12&&reply[..2]==id.to_be_bytes(){answers+=1;append(format!("LLMNR responder at {}",meta.endpoint.addr));}
  }
  if answers==0{append(String::from("No LLMNR responder (normal on many networks)"));}
 }

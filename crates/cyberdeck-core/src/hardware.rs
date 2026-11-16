@@ -178,10 +178,10 @@ impl PeripheralRegistry {
 
     /// Restore a busy device to ready (or its previous failure) after an operation.
     pub fn release(&mut self, class: DeviceClass) {
-        if let Some(entry) = self.entries.iter_mut().find(|e| e.class == class) {
-            if matches!(entry.state, DeviceState::Busy { .. }) {
-                entry.state = DeviceState::Ready;
-            }
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.class == class)
+            && matches!(entry.state, DeviceState::Busy { .. })
+        {
+            entry.state = DeviceState::Ready;
         }
     }
 

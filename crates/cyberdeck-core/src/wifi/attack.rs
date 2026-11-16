@@ -340,10 +340,10 @@ impl AttackRunner {
     }
 
     fn rotate_beacon_identity(&mut self) {
-        if self.frames % 4 == 0 {
+        if self.frames.is_multiple_of(4) {
             self.bssid = self.rng.mac();
         }
-        if self.ssid_len == 0 || self.frames % 8 == 0 {
+        if self.ssid_len == 0 || self.frames.is_multiple_of(8) {
             // Half the time use a realistic public SSID, half a random one: the
             // rotating pair is what the reference beacon-spam tools transmit.
             if self.rng.below(2) == 0 {

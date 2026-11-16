@@ -140,12 +140,15 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// Percent-decode `application/x-www-form-urlencoded` text (`+` becomes space).
 pub fn url_decode(input: &str, out: &mut String) {
+    // Percent-escapes decode into raw bytes first; form bodies are UTF-8, so
+    // invalid sequences become replacement characters instead of Latin-1 mojibake.
     let bytes = input.as_bytes();
+    let mut decoded = alloc::vec::Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
             b'+' => {
-                out.push(' ');
+                decoded.push(b' ');
                 i += 1;
             }
             b'%' if i + 2 < bytes.len() => {
@@ -153,21 +156,22 @@ pub fn url_decode(input: &str, out: &mut String) {
                 let lo = crate::util::hex_val_checked(bytes[i + 2]);
                 match (hi, lo) {
                     (Some(hi), Some(lo)) => {
-                        out.push(((hi << 4) | lo) as char);
+                        decoded.push((hi << 4) | lo);
                         i += 3;
                     }
                     _ => {
-                        out.push('%');
+                        decoded.push(b'%');
                         i += 1;
                     }
                 }
             }
             byte => {
-                out.push(byte as char);
+                decoded.push(byte);
                 i += 1;
             }
         }
     }
+    out.push_str(&alloc::string::String::from_utf8_lossy(&decoded));
 }
 
 /// Credentials extracted from a posted form.
@@ -242,10 +246,12 @@ impl CapturedCredentials {
 fn csv_escape(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
-        if ch == '"' {
-            out.push_str("\"\"");
-        } else {
-            out.push(ch);
+        match ch {
+            '"' => out.push_str("\"\""),
+            // Submitted values must stay on their own CSV row: a CR/LF inside a
+            // password would otherwise inject rows into the export.
+            '\r' | '\n' => out.push(' '),
+            _ => out.push(ch),
         }
     }
     out

@@ -145,6 +145,14 @@ impl App {
             |Screen::Setup(Tool::HidIntro|Tool::HidDucky|Tool::BleHid)
             |Screen::Running(Tool::HidIntro|Tool::HidDucky|Tool::BleHid))
     }
+    /// True while a screen that reads the passive Wi-Fi tables is visible, so
+    /// the snapshot cost is only paid where the data is shown.
+    pub fn wants_passive(&self)->bool {
+        match self.screen {
+            Screen::Setup(tool)|Screen::Running(tool)|Screen::Results(tool)|Screen::Unavailable(tool)=>matches!(tool.group(),Group::Wifi|Group::Packet),
+            _=>false,
+        }
+    }
     pub fn set_device_state(&mut self,class:DeviceClass,state:DeviceState,detail:Option<&str>) {self.registry.upsert(class,state,detail);self.needs_render=true;}
     pub fn network_credentials(&self)->(String,String) {(self.ssid.clone(),self.password.clone())}
     pub fn set_payloads(&mut self,names:&[&str]) {
@@ -183,11 +191,12 @@ impl App {
             Screen::Results(_)=>self.live.result_lines!=live.result_lines||self.live.export_status!=live.export_status||self.live.message!=live.message,
             _=>self.live.message!=live.message,
         };
-        if let Screen::Results(tool)=self.screen {
-            if let Some((saved_tool,saved))=&mut self.results {
-                if *saved_tool==tool {if live.export_status.is_some(){saved.export_status=live.export_status.clone();}if !live.result_lines.is_empty(){saved.result_lines=live.result_lines.clone();}}
-            }
-        }
+        if let Screen::Results(tool)=self.screen
+            && let Some((saved_tool,saved))=&mut self.results
+                && *saved_tool==tool {
+                    if live.export_status.is_some(){saved.export_status=live.export_status.clone();}
+                    if !live.result_lines.is_empty(){saved.result_lines=live.result_lines.clone();}
+                }
         self.live=live;self.needs_render|=changed;
     }
     pub fn message(&self)->Option<String> {self.live.message.clone()}
@@ -235,7 +244,7 @@ impl App {
                 self.settings.target=if matches!(tool,Tool::NetProbe|Tool::NetServices|Tool::NetDiscover){self.settings.target%254+1}else{((usize::from(self.settings.target)+1)%count.max(1)) as u8};
             },
             Field::Campaign=>self.settings.campaign=(self.settings.campaign+1)%cyberdeck_core::ble::spam::SpamCampaign::all().len() as u8,
-            Field::Stream=>self.settings.stream=!self.settings.stream,
+            Field::Stream=>self.settings.stream= !self.settings.stream,
             Field::RfRate=>self.settings.rf_rate=(self.settings.rf_rate+1)%3,
             Field::RfLength=>self.settings.rf_payload_len=self.settings.rf_payload_len%32+1,
             Field::FileRecover=>{},
@@ -292,7 +301,7 @@ impl App {
                 Button::Down if tool==Tool::PktFiles=>self.change_field(Field::Target,tool),
                 Button::Select if tool==Tool::PktFiles=>return Action::FilePreview(self.settings.target),
                 Button::Up=>self.scroll=self.scroll.saturating_sub(1),Button::Down=>self.scroll=(self.scroll+1).min(self.scroll_limit(&self.lines(tool,&self.live))),
-                Button::Select if tool.is_pausable()=>{self.live.usb_paused=!self.live.usb_paused;return Action::Pause(self.live.usb_paused);},
+                Button::Select if tool.is_pausable()=>{self.live.usb_paused= !self.live.usb_paused;return Action::Pause(self.live.usb_paused);},
                 Button::Select|Button::Back|Button::Home=>{self.save_results(tool);self.scroll=0;self.screen=if matches!(button,Button::Home){Screen::Home}else{Screen::Results(tool)};return Action::Stop;},
             },
             Screen::Results(tool)=>match button {
@@ -353,7 +362,7 @@ impl App {
         lines.extend(live.result_lines.iter().take(128).cloned());
         if let Some(status)=&live.export_status{lines.push(status.clone());}
         // The outcome often repeats the status line; show it only once.
-        if let Some(message)=&live.message{if lines.first().map(String::as_str)!=Some(message.as_str()){lines.push(message.clone());}}
+        if let Some(message)=&live.message&& lines.first().map(String::as_str)!=Some(message.as_str()){lines.push(message.clone());}
         if lines.is_empty(){lines.push(String::from("Waiting for data..."));}
         lines
     }
@@ -393,6 +402,7 @@ impl App {
             Field::Previous=>(String::from("Last run"),String::from("View the last results")),
         }
     }
+    #[allow(clippy::too_many_arguments, reason = "draw call passes position, box, text and the two colors it needs")]
     fn text(canvas:&mut impl Canvas,x:i16,y:i16,width:u16,text:&str,fg:Rgb565,bg:Rgb565,scale:u8) {
         if y<0||y.saturating_add(7*i16::from(scale))>canvas.height() as i16||x<0{return;}
         let width=width.min(canvas.width().saturating_sub(x as u16));
@@ -400,6 +410,7 @@ impl App {
         if columns>0 {canvas.draw_text(x,y,&ellipsize(text,columns),fg,bg,scale);}
     }
     /// Right-aligned, ellipsized text for label/value form rows.
+    #[allow(clippy::too_many_arguments, reason = "draw call passes position, box, text and the two colors it needs")]
     fn text_right(canvas:&mut impl Canvas,right:i16,y:i16,max_width:u16,text:&str,fg:Rgb565,bg:Rgb565,scale:u8) {
         let columns=usize::from(max_width/(u16::from(font::ADVANCE)*u16::from(scale)));
         if columns==0 {return;}
@@ -524,7 +535,7 @@ impl App {
                     Self::home_icon(canvas,x+12,y+19,index,if selected{theme::TEXT}else{theme::TEXT_DIM},bg);
                     Self::text(canvas,x+34,y+22,tile_w.saturating_sub(42),label,if selected{theme::TEXT}else{theme::TEXT_DIM},bg,1);
                 }
-                if full {Self::page_indicator(canvas,page,(8+count-1)/count,50,self.bottom(canvas));}
+                if full {Self::page_indicator(canvas,page,8_usize.div_ceil(count),50,self.bottom(canvas));}
             },
             Screen::Group(group)=>{
                 selection=self.tool_index;
@@ -541,7 +552,7 @@ impl App {
                     canvas.fill_rect(Rect::new(canvas.width().saturating_sub(16) as i16,y+18,3,3),dot);
                     Self::text(canvas,18,y+16,canvas.width().saturating_sub(40),tool.title(),if selected{theme::TEXT}else{theme::TEXT_DIM},bg,1);
                 }
-                if full {Self::page_indicator(canvas,page,(group.tools().len()+rows-1)/rows,50,self.bottom(canvas));}
+                if full {Self::page_indicator(canvas,page,group.tools().len().div_ceil(rows),50,self.bottom(canvas));}
             },
             Screen::Setup(tool)=>{
                 canvas.fill_rect(Rect::new(0,45,canvas.width(),canvas.height().saturating_sub(65)),theme::BACKGROUND);

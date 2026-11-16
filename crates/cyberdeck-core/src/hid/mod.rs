@@ -183,15 +183,15 @@ impl Layout {
         };
         // German layout differences for the shifted symbol row.
         if self == Self::De {
-            let remapped = match ch {
-                '"' => Some((key::ONE + 1, false)),
-                '@' => Some((key::ONE + 10, true)),
-                'z' => Some((key::A + 24, false)),
-                'Z' => Some((key::A + 24, true)),
-                _ => None,
-            };
-            if let Some(value) = remapped {
-                return Some(value);
+            match ch {
+                // German quotes are Shift+2; the US mapping would type a plain 2.
+                '"' => return Some((key::ONE + 1, true)),
+                // '@' is AltGr+Q on German; AltGr is not modeled, so the
+                // character is skipped rather than typed as US shift+2.
+                '@' => return None,
+                'z' => return Some((key::A + 24, false)),
+                'Z' => return Some((key::A + 24, true)),
+                _ => {}
             }
         }
         Some((code, shift))
@@ -224,12 +224,11 @@ impl Layout {
             "MENU" | "APP" => key::APPLICATION,
             "POWER" => key::POWER,
             _ => {
-                if let Some(rest) = upper.strip_prefix('F') {
-                    if let Ok(n) = rest.parse::<u8>() {
-                        if (1..=12).contains(&n) {
-                            return Some(key::F1 + (n - 1));
-                        }
-                    }
+                if let Some(rest) = upper.strip_prefix('F')
+                    && let Ok(n) = rest.parse::<u8>()
+                    && (1..=12).contains(&n)
+                {
+                    return Some(key::F1 + (n - 1));
                 }
                 return None;
             }
@@ -331,6 +330,7 @@ impl UsbProfile {
     pub const KEYBOARD_ONLY: Self = Self {
         product_id: 0x0002,
         product: "Admin12121 Keyboard",
+        serial: "CD-KBD-0001",
         mouse: false,
         consumer: false,
         ..Self::HID_COMBO
@@ -340,8 +340,20 @@ impl UsbProfile {
     pub const KEYBOARD_CDC: Self = Self {
         product_id: 0x0003,
         product: "Admin12121 Keyboard + Console",
+        serial: "CD-KCDC-0001",
         mouse: false,
         consumer: false,
+        cdc: true,
+        ..Self::HID_COMBO
+    };
+
+    /// The deck's shipping build: full HID combo plus the CDC console/stream.
+    /// pid.codes 0x1209:0x0003 is the shared test PID range; register a
+    /// dedicated PID before any public release.
+    pub const HID_CDC: Self = Self {
+        product_id: 0x0003,
+        product: "Admin12121 Deck Console",
+        serial: "CD-DECK-0001",
         cdc: true,
         ..Self::HID_COMBO
     };
@@ -394,7 +406,9 @@ mod tests {
     fn german_layout_swaps_y_and_z() {
         assert_eq!(Layout::De.map_char('y'), Some((key::A + 25, false)));
         assert_eq!(Layout::De.map_char('z'), Some((key::A + 24, false)));
-        assert_eq!(Layout::De.map_char('"'), Some((key::ONE + 1, false)));
+        assert_eq!(Layout::De.map_char('"'), Some((key::ONE + 1, true)));
+        // AltGr is not modeled: '@' is skipped on the German layout.
+        assert_eq!(Layout::De.map_char('@'), None);
     }
 
     #[test]

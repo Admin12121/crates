@@ -54,7 +54,8 @@ impl RxRing{
 }
 static RX:Mutex<RefCell<RxRing>>=Mutex::new(RefCell::new(RxRing::new()));
 fn receive(packet:esp_radio::wifi::sniffer::PromiscuousPkt){
-    if packet.frame_type==3 || packet.rx_cntl.rx_state!=0{return}
+    // Runts below the smallest 802.11 frame are dropped before they cost a ring slot.
+    if packet.frame_type==3 || packet.rx_cntl.rx_state!=0 || packet.len<10 {return}
     let len=packet.len.min(packet.data.len()).min(SNAP_LEN);
     let mut f=CapturedFrame::EMPTY;f.len=len as u16;f.original_len=packet.len as u32;
     f.timestamp_us=packet.rx_cntl.timestamp.duration_since_epoch().as_micros();
@@ -381,12 +382,12 @@ async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filt
             });
             // KARMA: answer a device's "where is X?" request once per identity,
             // capped at three replies, with an open network using that name.
-            if respond{
-                if let cyberdeck_core::wifi::ap::Observation::ProbeRequest{client}=observation{
-                    if client!=MacAddr::new(karma_mac){
-                        if let Some(header)=FrameHeader::parse(f.parser_bytes()){
-                            if let Some(ssid)=frame::find_ssid(header.body){
-                                if !ssid.is_empty(){
+            if respond
+                && let cyberdeck_core::wifi::ap::Observation::ProbeRequest{client}=observation
+                    && client!=MacAddr::new(karma_mac)
+                        && let Some(header)=FrameHeader::parse(f.parser_bytes())
+                            && let Some(ssid)=frame::find_ssid(header.body)
+                                && !ssid.is_empty(){
                                     let known=replied.iter_mut().find(|(c,s,_)|*c==client&&s.as_slice()==ssid);
                                     if known.as_ref().map(|entry|entry.2<3).unwrap_or(true){
                                         let response=frame::probe_response(client,MacAddr::new(karma_mac),ssid,f.channel,false);
@@ -397,31 +398,24 @@ async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filt
                                         }}
                                     }
                                 }
-                            }
-                        }
-                    }
-                }
-            }
-            if filter.matches(f.parser_bytes()){
-                if let Some(writer)=pcap.as_mut(){
+            if filter.matches(f.parser_bytes())
+                && let Some(writer)=pcap.as_mut(){
                     let freq=Channel::new(f.channel).map(|c|c.frequency_mhz()).unwrap_or(2412);
                     let mut rt=Radiotap::for_mgmt(freq,f.rssi);rt.tsft_us=f.timestamp_us;
                     if let Err(e)=writer.write_frame_with_original(Timestamp::from_micros(f.timestamp_us),f.bytes(),f.original_len,&rt){error=Some(alloc::format!("{e:?}"));break 'session}
                 }
-            }
             if stop_requested(){break 'session}
         }
-        if channel==0{
-            if let Some(next)=hopper.poll(session_start.elapsed().as_millis()){
+        if channel==0
+            && let Some(next)=hopper.poll(session_start.elapsed().as_millis()){
                 let primary=next.get();
                 if let Err(e)=controller.set_channel(primary,SecondaryChannel::None){error=Some(alloc::format!("channel tune failed: {e:?}"));break 'session}
                 critical_section::with(|cs|WIFI_STATE.borrow_ref_mut(cs).channel=primary);
                 set_status(&observe_status(true,primary,&filter,respond));
             }
-        }
         critical_section::with(|cs|WIFI_STATE.borrow_ref_mut(cs).dropped=RX.borrow_ref(cs).dropped);
         if last_publish.elapsed()>=embassy_time::Duration::from_millis(250){
-            let rows=passive_snapshot().aps;critical_section::with(|cs|WIFI_STATE.borrow_ref_mut(cs).aps=rows);last_publish=embassy_time::Instant::now();
+            let rows=passive_aps();critical_section::with(|cs|WIFI_STATE.borrow_ref_mut(cs).aps=rows);last_publish=embassy_time::Instant::now();
         }
         embassy_time::Timer::after(embassy_time::Duration::from_millis(10)).await;
     }
@@ -583,12 +577,11 @@ async fn dns_service(stack:embassy_net::Stack<'static>)->!{
     }
     loop{
         let mut query=[0u8;512];
-        if let Ok(Ok((length,meta)))=embassy_time::with_timeout(embassy_time::Duration::from_millis(500),socket.recv_from(&mut query)).await{
-            if let Some(answer)=portal::dns_response(&query[..length],PORTAL_IP){
+        if let Ok(Ok((length,meta)))=embassy_time::with_timeout(embassy_time::Duration::from_millis(500),socket.recv_from(&mut query)).await
+            && let Some(answer)=portal::dns_response(&query[..length],PORTAL_IP){
                 let _=socket.send_to(&answer,meta.endpoint).await;
                 note_portal_request();
             }
-        }
     }
 }
 
@@ -662,7 +655,7 @@ async fn portal_session(controller:&mut WifiController<'static>,token:u32,ssid:S
             set_status("Radio busy");return
         };
         static PORTAL_RESOURCES:StaticCell<embassy_net::StackResources<5>>=StaticCell::new();
-        let seed=embassy_time::Instant::now().as_micros() as u64;
+        let seed=embassy_time::Instant::now().as_micros();
         let net_config=embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4{
             address:embassy_net::Ipv4Cidr::new(
                 embassy_net::Ipv4Address::new(PORTAL_IP[0],PORTAL_IP[1],PORTAL_IP[2],PORTAL_IP[3]),24),
@@ -687,6 +680,17 @@ async fn portal_session(controller:&mut WifiController<'static>,token:u32,ssid:S
     let _=controller.set_config(&Config::Station(StationConfig::default()));
 }
 
+/// Access-point rows only: the lighter read for screens that refresh the AP
+/// list without building the client/probe/inspector tables.
+fn passive_aps()->Vec<ApRow>{critical_section::with(|cs|{
+    OBSERVER.borrow_ref(cs).scan.aps.iter().map(|a|ApRow{ssid:a.ssid.display(),bssid:a.bssid,channel:a.channel,rssi:a.rssi,security:a.security.security.label()}).collect()
+})}
+/// Headline counts without the tables, for screens outside the Wi-Fi and
+/// packet groups.
+pub fn passive_counts()->PassiveSnapshot{critical_section::with(|cs|{
+    let o=OBSERVER.borrow_ref(cs);
+    PassiveSnapshot{aps:Vec::new(),clients:Vec::new(),wps:Vec::new(),probes:Vec::new(),probe_ssids:o.probe_ssids() as u32,frames:Vec::new(),eapol:o.scan.eapol,handshakes:o.handshakes.complete_count()as u32,pmkids:o.handshakes.pmkid_count()as u32,histogram:String::new()}
+})}
 pub fn passive_snapshot()->PassiveSnapshot{critical_section::with(|cs|{
     let o=OBSERVER.borrow_ref(cs);
     PassiveSnapshot{aps:o.scan.aps.iter().map(|a|ApRow{ssid:a.ssid.display(),bssid:a.bssid,channel:a.channel,rssi:a.rssi,security:a.security.security.label()}).collect(),

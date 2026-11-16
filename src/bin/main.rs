@@ -53,41 +53,69 @@ use esp_hal::uart::{UartRx, Config as UartConfig};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
+/// Crash diagnosis (CORE-08): the panic handler records the failing code line
+/// in persistent RTC RAM and restarts, turning a bug into a diagnosable boot
+/// instead of a silent hang. Power loss clears the record. If the crash
+/// repeats before boot ever reached the reporting code, the second handler
+/// invocation hangs instead of resetting again — a visible stop beats an
+/// invisible reset loop.
+#[esp_hal::ram(unstable(rtc_fast, persistent))]
+static mut PANIC_MARK: u32 = 0;
+#[esp_hal::ram(unstable(rtc_fast, persistent))]
+static mut PANIC_LINE: u32 = 0;
+const PANIC_MAGIC: u32 = 0xC1BE_DE01;
+
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    loop {}
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    // Safety: plain stores into persistent RTC RAM. Only this handler and the
+    // boot-time read below touch these statics; no allocator or lock involved.
+    let repeat = unsafe { PANIC_MARK } == PANIC_MAGIC;
+    // An absent location clears a stale line from an earlier crash.
+    unsafe { PANIC_LINE = info.location().map_or(0, |location| location.line()) };
+    if repeat {
+        loop {}
+    }
+    unsafe { PANIC_MARK = PANIC_MAGIC };
+    esp_hal::system::software_reset()
 }
 
 #[embassy_executor::task]
+#[allow(clippy::large_stack_frames, reason = "embassy task futures live in the executor pool, not the call stack; their locals are the actor working buffers")]
 async fn wifi_actor(controller: WifiController<'static>) {
     wifi::run(controller).await
 }
 
 #[embassy_executor::task]
+#[allow(clippy::large_stack_frames, reason = "embassy task futures live in the executor pool, not the call stack; their locals are the actor working buffers")]
 async fn ble_actor(controller: ExternalController<BleConnector<'static>, 1>) {
     ble::run(controller).await
 }
 
 #[embassy_executor::task]
+#[allow(clippy::large_stack_frames, reason = "embassy task futures live in the executor pool, not the call stack; their locals are the actor working buffers")]
 async fn sd_actor(bus: SdBus<'static>) {
     sd::run(bus).await
 }
 
 #[embassy_executor::task]
+#[allow(clippy::large_stack_frames, reason = "embassy task futures live in the executor pool, not the call stack; their locals are the actor working buffers")]
 async fn usb_actor(usb: esp_hal::usb::otg::Usb<'static>) {
     usb::run(usb).await
 }
 
 #[embassy_executor::task]
+#[allow(clippy::large_stack_frames, reason = "embassy task futures live in the executor pool, not the call stack; their locals are the actor working buffers")]
 async fn network_runner(mut runner: embassy_net::Runner<'static, esp_radio::wifi::Interface>) {
     runner.run().await
 }
 #[embassy_executor::task]
+#[allow(clippy::large_stack_frames, reason = "embassy task futures live in the executor pool, not the call stack; their locals are the actor working buffers")]
 async fn network_actor(stack: embassy_net::Stack<'static>) {
     network::run(stack).await
 }
 #[cfg(cyberdeck_board_field)]
 #[embassy_executor::task]
+#[allow(clippy::large_stack_frames, reason = "embassy task futures live in the executor pool, not the call stack; their locals are the actor working buffers")]
 async fn gps_actor(uart: UartRx<'static, esp_hal::Async>) {
     gps::run(uart).await
 }
@@ -143,7 +171,7 @@ impl<'d> RfRuntime<'d> {
                     let _ = radio.sample(&mut self.spectrum);
                     radio.rx_mode(false);
                 }
-                if self.channel_cursor % cyberdeck_core::rf::nrf24::CHANNEL_COUNT as usize == 0 {
+                if self.channel_cursor.is_multiple_of(cyberdeck_core::rf::nrf24::CHANNEL_COUNT as usize) {
                     self.spectrum.finish_sweep();
                 }
             }
@@ -209,6 +237,11 @@ async fn main(spawner: Spawner) -> ! {
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
+
+    // Report the previous crash once, then clear the marker. This runs before
+    // any task is spawned, so no other code touches the panic statics.
+    // Safety: only the panic handler writes these statics; reads are by value.
+    let (mark, line) = unsafe { (PANIC_MARK, PANIC_LINE) };
 
     // Board selection is a build-time switch (`CYBERDECK_BOARD=field`).
     #[cfg(cyberdeck_board_field)]
@@ -441,8 +474,8 @@ async fn main(spawner: Spawner) -> ! {
     probe.record(DeviceClass::Gps, Err("connect UART GPS using the FIELD profile"));
 
     let mut net_started = false;
-    if wifi_started {
-        if let Some(interface) = esp_radio::wifi::Interface::try_station() {
+    if wifi_started
+        && let Some(interface) = esp_radio::wifi::Interface::try_station() {
             static NETWORK_RESOURCES: StaticCell<embassy_net::StackResources<4>> = StaticCell::new();
             let seed = u64::from(esp_hal::rng::Rng::new().random()) << 32
                 | u64::from(esp_hal::rng::Rng::new().random());
@@ -452,10 +485,13 @@ async fn main(spawner: Spawner) -> ! {
             if let Ok(token) = network_runner(runner) {spawner.spawn(token);}
             if let Ok(token) = network_actor(stack) {spawner.spawn(token);net_started = true;}
         }
-    }
 
     let mut rf = RfRuntime::new(nrf);
     let mut app = App::new(probe.registry);
+    if mark == PANIC_MAGIC {
+        app.set_message(&alloc::format!("Restarted after a crash at code line {line}"));
+        unsafe { PANIC_MARK = 0 };
+    }
     let flags=control::Flags{wifi:wifi_started,ble:ble_started,usb:usb_started,gps:gps_started,network:net_started};
     control::enable(&mut app,flags);
     // Built-in demo scripts plus any `*.TXT` payloads on the card.
@@ -527,10 +563,9 @@ async fn main(spawner: Spawner) -> ! {
         }
         rf.step(now_ms);
         if payload::sync_from_storage(){refresh_payloads(&mut app);}
-        if app.wants_payloads()&&sd::ready()&&now_ms.saturating_sub(last_payload_scan)>=3000{
-            if sd::request_payload_scan(){last_payload_scan=now_ms;}
-        }
-        if let Some((adc,pin,divider,last))=battery_adc.as_mut(){if now_ms.saturating_sub(*last)>=500{battery::publish(adc.read_blocking(pin),*divider);*last=now_ms;}}
+        if app.wants_payloads()&&sd::ready()&&now_ms.saturating_sub(last_payload_scan)>=3000
+            && sd::request_payload_scan(){last_payload_scan=now_ms;}
+        if let Some((adc,pin,divider,last))=battery_adc.as_mut()&& now_ms.saturating_sub(*last)>=500{battery::publish(adc.read_blocking(pin),*divider);*last=now_ms;}
         if active_tool==Some(Tool::GpsWardrive)&&now_ms.saturating_sub(last_wardrive_scan)>=10_000&&!wifi::busy(){wifi::submit(WifiCommand::Scan);last_wardrive_scan=now_ms;}
         if gps::detected()!=gps_seen {gps_seen=gps::detected();app.set_device_state(DeviceClass::Gps,if gps_seen{DeviceState::Ready}else{DeviceState::NotDetected},Some("UART NMEA receiver"));}
         if now_ms.saturating_sub(last_render_ms)>=250 {
@@ -540,7 +575,7 @@ async fn main(spawner: Spawner) -> ! {
             let(usb_status,usb_percent,usb_keystrokes,usb_unsupported)=if active_tool==Some(Tool::BleHid){ble::hid_snapshot()}else{usb::snapshot()};
             let(net_status,mut net_lines,net_busy)=network::snapshot();
             net_lines.insert(0,net_status.clone());
-            let passive=wifi::passive_snapshot();
+            let passive=if app.wants_passive(){wifi::passive_snapshot()}else{wifi::passive_counts()};
             let(portal_clients,portal_requests)=wifi::portal_snapshot();
             let mut packet_lines=Vec::new();
             match active_tool {
@@ -590,7 +625,7 @@ async fn main(spawner: Spawner) -> ! {
                 };
                 if let Some(status)=finished{export_findings(active_tool,&rf);app.finish(status);active_tool=None;}
             }
-            if let Ok(panel)=display.as_mut(){if app.take_dirty(){app.render(panel);panel.present();}}
+            if let Ok(panel)=display.as_mut()&& app.take_dirty(){app.render(panel);panel.present();}
             last_render_ms=now_ms;
         }
         Timer::after(Duration::from_millis(20)).await;

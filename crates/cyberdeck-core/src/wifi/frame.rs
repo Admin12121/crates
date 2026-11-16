@@ -404,7 +404,7 @@ pub fn classify_security(body: &[u8], capability_privacy: bool) -> SecurityInfo 
 
     let mut pmf_required = false;
     if let Some(rsn) = rsn {
-        let (has_psk, has_sae, has_8021x) = parse_akm_suites(rsn);
+        let (has_psk, has_sae, has_8021x, has_owe) = parse_akm_suites(rsn);
         let caps = rsn.get(rsn.len().saturating_sub(2)..).and_then(|tail| {
             if rsn.len() >= 2 {
                 Some(u16::from_le_bytes([tail[0], tail[1]]))
@@ -421,8 +421,9 @@ pub fn classify_security(body: &[u8], capability_privacy: bool) -> SecurityInfo 
             _ => Security::Wpa2Psk,
         };
         if !has_psk && !has_sae && !has_8021x {
-            // OWE-only networks advertise AKM 18.
-            security = Security::Owe;
+            // OWE-only networks advertise AKM 18; a truncated or unrecognized
+            // AKM list must stay Unknown, not masquerade as OWE.
+            security = if has_owe { Security::Owe } else { Security::Unknown };
         }
     }
 
@@ -435,22 +436,23 @@ pub fn classify_security(body: &[u8], capability_privacy: bool) -> SecurityInfo 
 }
 
 /// Return `(psk, sae, 8021x)` from the AKM suite list of an RSN element.
-fn parse_akm_suites(rsn: &[u8]) -> (bool, bool, bool) {
+fn parse_akm_suites(rsn: &[u8]) -> (bool, bool, bool, bool) {
     // version(2) | group cipher(4) | pairwise count(2) | pairwise(n*4) |
     // akm count(2) | akm(n*4) | capabilities(2)
     if rsn.len() < 8 {
-        return (false, false, false);
+        return (false, false, false, false);
     }
     let pairwise_count = u16::from_le_bytes([rsn[6], rsn[7]]) as usize;
     let mut offset = 8 + pairwise_count * 4;
     if rsn.len() < offset + 2 {
-        return (false, false, false);
+        return (false, false, false, false);
     }
     let akm_count = u16::from_le_bytes([rsn[offset], rsn[offset + 1]]) as usize;
     offset += 2;
     let mut psk = false;
     let mut sae = false;
     let mut eap = false;
+    let mut owe = false;
     for _ in 0..akm_count {
         if rsn.len() < offset + 4 {
             break;
@@ -461,12 +463,12 @@ fn parse_akm_suites(rsn: &[u8]) -> (bool, bool, bool) {
             1 => eap = true,
             2 => psk = true,
             8 => sae = true,
-            18 => {}
+            18 => owe = true,
             _ => {}
         }
         offset += 4;
     }
-    (psk, sae, eap)
+    (psk, sae, eap, owe)
 }
 
 /// Capability information field of a beacon/probe-response body.

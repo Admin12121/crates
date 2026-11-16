@@ -33,27 +33,44 @@ fn save_fix(f:&Fix,now:u64,history:&FixHistory<8>,cursor:&mut ObservationCursor<
  if wardrive{
   let (aps,seen)=super::wifi::scan_observations();
   if let Some(matched)=history.closest(seen,1500){
-   for ap in aps.iter().take(24){let address=ap.bssid.to_string();if cursor.accept(&format!("WIFI:{address}"),seen,now,2500){if let Some(row)=wigle_row(matched,&WardriveObservation{address:&address,name:&ap.ssid,auth:ap.security,channel:ap.channel,rssi:ap.rssi,kind:"WIFI"}){bytes.push_str(&row);}}}
+   for ap in aps.iter().take(24){let address=ap.bssid.to_string();if cursor.accept(&format!("WIFI:{address}"),seen,now,2500)&& let Some(row)=wigle_row(matched,&WardriveObservation{address:&address,name:&ap.ssid,auth:ap.security,channel:ap.channel,rssi:ap.rssi,kind:"WIFI"}){bytes.push_str(&row);}}
   }
   for (device,seen) in super::ble::timed_devices().iter().take(24){
-   if let Some(matched)=history.closest(*seen,1500){if cursor.accept(&format!("BLE:{}",device.address),*seen,now,2500){if let Some(row)=wigle_row(matched,&WardriveObservation{address:&device.address,name:&device.name,auth:"[BLE]",channel:0,rssi:device.rssi,kind:"BLE"}){bytes.push_str(&row);}}}
+   if let Some(matched)=history.closest(*seen,1500)&& cursor.accept(&format!("BLE:{}",device.address),*seen,now,2500)&& let Some(row)=wigle_row(matched,&WardriveObservation{address:&device.address,name:&device.name,auth:"[BLE]",channel:0,rssi:device.rssi,kind:"BLE"}){bytes.push_str(&row);}
   }
  }else if cursor.accept("TRACK",f.received_ms,now,cyberdeck_core::gps::FIX_TTL_MS){bytes=f.csv_row(now);}
  if bytes.is_empty(){return;}
  if let Some(ticket)=sd::enqueue_tracked(&name,bytes.into_bytes(),true){critical_section::with(|cs|{let mut s=STATE.borrow_ref_mut(cs);s.points=s.points.saturating_add(1);s.ticket=Some(ticket);});}else{critical_section::with(|cs|STATE.borrow_ref_mut(cs).recording=false);message("Recording stopped: card unavailable");}
 }
 pub async fn run(mut uart:UartRx<'static,Async>)->!{
- let mut parser=Nmea::new();let mut buffer=[0;96];let mut last_record=0;let mut last_publish=0;let mut history=FixHistory::<8>::new();let mut cursor=ObservationCursor::<64>::new();let mut track=TrackLog::<256>::new();
+ let mut parser=Nmea::new();let mut buffer=[0;96];let mut last_record=0;let mut last_publish=0;let mut history=FixHistory::<8>::new();let mut cursor=ObservationCursor::<64>::new();let mut track=TrackLog::<256>::new();let mut fence:Option<(i32,i32)>=None;
  loop{
   if let Some(command)=critical_section::with(|cs|COMMAND.borrow_ref_mut(cs).take()){match command{
-   GpsCommand::Record=>{cursor=ObservationCursor::new();track=TrackLog::new();begin(false)},
-   GpsCommand::Wardrive=>{cursor=ObservationCursor::new();track=TrackLog::new();begin(true)},
-   GpsCommand::Stop=>{
+   GpsCommand::Record=>{
+    cursor=ObservationCursor::new();track=TrackLog::new();begin(false);
+    // The fence anchor exists only when recording truly started, and comes
+    // from the TTL-filtered fix, never a stale cached one.
+    fence=if critical_section::with(|cs|STATE.borrow_ref(cs).recording){fix().map(|f|(f.latitude_e7,f.longitude_e7))}else{None};
+   },
+   GpsCommand::Wardrive=>{cursor=ObservationCursor::new();track=TrackLog::new();fence=None;begin(true)},
+    GpsCommand::Stop=>{
     critical_section::with(|cs|STATE.borrow_ref_mut(cs).recording=false);
+    fence=None;
     // Route recording keeps an in-memory copy; stopping exports it as GPX.
+    // A long route exceeds the storage actor's 8 KB job cap, so the document
+    // is queued in tag-aligned chunks: the first chunk creates the file and
+    // later chunks append (the storage queue is FIFO, so order holds).
     if !track.is_empty(){
      let name=sd::next_name("TRK","GPX");
-     let exported=sd::enqueue(&name,track.gpx().into_bytes(),false);
+     let mut exported=true;let mut append=false;let mut batch=String::new();
+     for tag in track.gpx().lines(){
+      batch.push_str(tag);batch.push('\n');
+      if batch.len()>=6000{
+       if !sd::enqueue(&name,batch.into_bytes(),append){exported=false;}
+       append=true;batch=String::new();
+      }
+     }
+     if !batch.is_empty()&&!sd::enqueue(&name,batch.into_bytes(),append){exported=false;}
      message(if exported{"Track exported"}else{"Track export failed: card unavailable"});
     }
     track=TrackLog::new();
@@ -75,6 +92,13 @@ pub async fn run(mut uart:UartRx<'static,Async>)->!{
     else{lines.push(String::from(if s.seen{"Waiting for location"}else{"No GPS receiver data"}));}
     lines.push(format!("{} updates, {} bad",parser.sentences(),parser.checksum_errors()));
     if let Some(file)=&s.file{lines.push(format!("{} {} points",if s.recording{"REC"}else{"Stopped"},s.points));lines.push(file.clone());}
+    // Geofence: the route's first fix is the center; drift beyond 500 m is reported.
+    if s.recording
+     && let Some((latitude_e7,longitude_e7))=fence
+     && let Some(f)=fresh.as_ref(){
+      let inside=cyberdeck_core::gps::geofence_contains(f,latitude_e7,longitude_e7,500);
+      lines.push(String::from(if inside{"Inside 500 m of the start point"}else{"More than 500 m from the start point"}));
+     }
     s.lines=lines;
    });last_publish=now;
   }

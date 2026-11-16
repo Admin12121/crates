@@ -147,6 +147,7 @@ impl<const N: usize> ApTable<N> {
     }
 
     /// Insert or update a beacon/probe-response observation.
+    #[allow(clippy::too_many_arguments, reason = "one flat field per captured-frame attribute")]
     pub fn observe(
         &mut self,
         bssid: MacAddr,
@@ -233,10 +234,10 @@ impl<const N: usize> ApTable<N> {
     fn evict_weakest(&mut self) {
         let mut weakest: Option<(usize, i16)> = None;
         for (idx, slot) in self.records.iter().enumerate() {
-            if let Some(record) = slot {
-                if weakest.map(|(_, v)| record.rssi_avg16 < v).unwrap_or(true) {
-                    weakest = Some((idx, record.rssi_avg16));
-                }
+            if let Some(record) = slot
+                && weakest.map(|(_, v)| record.rssi_avg16 < v).unwrap_or(true)
+            {
+                weakest = Some((idx, record.rssi_avg16));
             }
         }
         if let Some((idx, _)) = weakest {
@@ -349,10 +350,10 @@ impl<const N: usize> StationTable<N> {
                 // Evict the least recently seen station.
                 let mut oldest: Option<(usize, u64)> = None;
                 for (i, slot) in self.records.iter().enumerate() {
-                    if let Some(record) = slot {
-                        if oldest.map(|(_, t)| record.last_seen_ms < t).unwrap_or(true) {
-                            oldest = Some((i, record.last_seen_ms));
-                        }
+                    if let Some(record) = slot
+                        && oldest.map(|(_, t)| record.last_seen_ms < t).unwrap_or(true)
+                    {
+                        oldest = Some((i, record.last_seen_ms));
                     }
                 }
                 let (i, _) = oldest.expect("table is full");

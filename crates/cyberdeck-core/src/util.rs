@@ -47,7 +47,7 @@ fn hex_val(byte: u8) -> Option<u8> {
 /// Decode hex into `out`, returning the number of bytes written.
 pub fn hex_decode(text: &str, out: &mut [u8]) -> Result<usize, DeckError> {
     let bytes = text.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(DeckError::InvalidInput {
             reason: "hex string has an odd length",
         });

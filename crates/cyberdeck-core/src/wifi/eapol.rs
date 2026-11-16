@@ -30,6 +30,8 @@ pub const KEY_DATA_LEN_OFFSET: usize = 97;
 /// Minimum EAPOL-Key frame length (no key data).
 pub const MIN_EAPOL_KEY_LEN: usize = 99;
 
+/// `key_info` flag: pairwise (messages 1-4); clear for the group key handshake.
+pub const KEY_INFO_KEY_TYPE: u16 = 0x0008;
 /// `key_info` flag: access point acknowledges (messages 1 and 3).
 pub const KEY_INFO_ACK: u16 = 0x0080;
 /// `key_info` flag: MIC is present (messages 2, 3, 4).
@@ -123,12 +125,20 @@ impl<'a> EapolKey<'a> {
         let ack = key_info & KEY_INFO_ACK != 0;
         let install = key_info & KEY_INFO_INSTALL != 0;
         let nonce_zero = nonce.iter().all(|b| *b == 0);
-        let message = match (has_mic, ack, install, nonce_zero) {
-            (false, true, _, _) => HandshakeMessage::Message1,
-            (true, true, true, _) => HandshakeMessage::Message3,
-            (true, false, false, true) => HandshakeMessage::Message4,
-            (true, false, false, false) => HandshakeMessage::Message2,
-            _ => HandshakeMessage::Unknown,
+        // The group key handshake shares the M1/M2 flag shape but never carries
+        // pairwise nonces; treating it as M1/M2 would overwrite a stored capture
+        // (KeyType bit 0x0008 is clear on group frames, set on pairwise ones).
+        let pairwise = key_info & KEY_INFO_KEY_TYPE != 0;
+        let message = if !pairwise {
+            HandshakeMessage::Unknown
+        } else {
+            match (has_mic, ack, install, nonce_zero) {
+                (false, true, _, _) => HandshakeMessage::Message1,
+                (true, true, true, _) => HandshakeMessage::Message3,
+                (true, false, false, true) => HandshakeMessage::Message4,
+                (true, false, false, false) => HandshakeMessage::Message2,
+                _ => HandshakeMessage::Unknown,
+            }
         };
 
         Some(Self {
@@ -231,8 +241,10 @@ impl Handshake {
         }
     }
 
+    /// ANonce is present from M1, or recovered from M3 when M1 was missed
+    /// (hcxtools message-pair 2: EAPOL from M2, ANonce from M3).
     pub fn has_anonce(&self) -> bool {
-        self.messages & HandshakeMessage::Message1.bit() != 0
+        self.messages & (HandshakeMessage::Message1.bit() | HandshakeMessage::Message3.bit()) != 0
     }
 
     pub fn has_snonce(&self) -> bool {
@@ -279,6 +291,11 @@ impl Handshake {
 
     /// Verify a candidate passphrase against this capture, on device.
     pub fn verify_passphrase(&self, passphrase: &[u8]) -> Verification {
+        if self.ssid.is_empty() {
+            // Without the SSID the PMK derivation is meaningless; report the
+            // missing input rather than a wrong "invalid passphrase".
+            return Verification::NeedMoreData;
+        }
         if !self.has_anonce() || !self.has_mic() || self.eapol.len() < MIN_EAPOL_KEY_LEN {
             return Verification::NeedMoreData;
         }
@@ -315,13 +332,21 @@ impl Handshake {
     /// hashcat 22000 line for this handshake, when the capture is usable.
     ///
     /// The message-pair byte follows the hcxtools convention: `00` for M1+M2,
-    /// `01` when only M1+M4 was captured.
+    /// `02` for M2+M3 (ANonce from M3), `01` when only M1+M4 was captured.
     pub fn hc22000(&self) -> Option<String> {
         if self.eapol.is_empty() || self.ssid.is_empty() || !self.has_anonce() {
             return None;
         }
-        let has_m2 = self.messages & HandshakeMessage::Message2.bit() != 0;
-        let pair = if has_m2 { "00" } else { "01" };
+        let has = |m: HandshakeMessage| self.messages & m.bit() != 0;
+        let (has_m1, has_m2, has_m3) = (
+            has(HandshakeMessage::Message1),
+            has(HandshakeMessage::Message2),
+            has(HandshakeMessage::Message3),
+        );
+        let pair = if has_m1 && has_m2 { "00" }
+            else if !has_m1 && has_m2 && has_m3 { "02" }
+            else if has_m1 && !has_m2 { "01" }
+            else { return None; };
         if self.quality() != HandshakeQuality::Complete { return None; }
         let mut eapol=self.eapol.clone();
         eapol.get_mut(MIC_OFFSET..MIC_OFFSET+16)?.fill(0);
@@ -442,10 +467,10 @@ impl<const N: usize> HandshakeStore<N> {
                         // Replace the oldest capture: newest evidence wins.
                         let mut oldest: Option<(usize, u64)> = None;
                         for (i, slot) in self.entries.iter().enumerate() {
-                            if let Some(h) = slot {
-                                if oldest.map(|(_, t)| h.last_seen_ms < t).unwrap_or(true) {
+                            if let Some(h) = slot
+                                && oldest.map(|(_, t)| h.last_seen_ms < t).unwrap_or(true)
+                            {
                                     oldest = Some((i, h.last_seen_ms));
-                                }
                             }
                         }
                         let (i, _) = oldest?;
@@ -468,10 +493,8 @@ impl<const N: usize> HandshakeStore<N> {
         record.last_seen_ms = now_ms;
         if !record.ssid.is_hidden() {
             // keep
-        } else if let Some(name) = ssid {
-            if !name.is_empty() {
-                record.ssid = Ssid::new(name);
-            }
+        } else if let Some(name) = ssid && !name.is_empty() {
+            record.ssid = Ssid::new(name);
         }
         if channel != 0 {
             record.channel = channel;
@@ -568,9 +591,14 @@ mod tests {
         [0x22; 32]
     }
 
+    /// Test frames are pairwise; the group handshake is covered separately.
+    fn pairwise(key_info: u16) -> u16 {
+        key_info | KEY_INFO_KEY_TYPE
+    }
+
     /// Build a properly signed message 2 for the known passphrase.
     fn signed_message2() -> Vec<u8> {
-        let mut frame = build_eapol_key(DESCRIPTOR_RSN, KEY_INFO_MIC | 0x0002, 1, &snonce(), &[]);
+        let mut frame = build_eapol_key(DESCRIPTOR_RSN, pairwise(KEY_INFO_MIC | 0x0002), 1, &snonce(), &[]);
         let pmk = derive_pmk(PASS, SSID);
         let keys = derive_ptk(&pmk, &AP.0, &CLIENT.0, &anonce(), &snonce());
         let mic = compute_mic(&keys.kck, &frame);
@@ -579,14 +607,63 @@ mod tests {
     }
 
     #[test]
+    fn group_key_handshake_frames_cannot_poison_a_stored_capture() {
+        let mut store: HandshakeStore<4> = HandshakeStore::new();
+        let ap = MacAddr([1; 6]);
+        let client = MacAddr([2; 6]);
+        let m1 = build_eapol_key(DESCRIPTOR_RSN, pairwise(KEY_INFO_ACK), 1, &anonce(), &[]);
+        store.on_eapol(&m1, ap, client, Some(SSID), 1, 1);
+        store.on_eapol(&signed_message2(), ap, client, Some(SSID), 1, 2);
+        let before = store.get(ap, client).unwrap().anonce;
+        // Group key handshake M1: KeyType clear, secure set, zero nonce. The
+        // zero nonce must not overwrite the stored pairwise ANonce.
+        let group_m1 = build_eapol_key(DESCRIPTOR_RSN, KEY_INFO_SECURE | KEY_INFO_ACK, 1, &[0; 32], &[]);
+        store.on_eapol(&group_m1, ap, client, Some(SSID), 1, 3);
+        let after = store.get(ap, client).unwrap();
+        assert_eq!(after.anonce, before);
+        assert_eq!(after.quality(), HandshakeQuality::Complete);
+        assert!(after.hc22000().is_some(), "capture stays crackable");
+    }
+
+    #[test]
+    fn m2_m3_captures_export_with_anonce_from_message3() {
+        let mut store: HandshakeStore<4> = HandshakeStore::new();
+        let ap = MacAddr([1; 6]);
+        let client = MacAddr([2; 6]);
+        // No M1 reached the store: ANonce must be recovered from M3.
+        let mut m2 = build_eapol_key(DESCRIPTOR_RSN, pairwise(KEY_INFO_MIC), 1, &snonce(), &[]);
+        {
+            let pmk = derive_pmk(PASS, SSID);
+            // The MIC must bind the same addresses the capture stores.
+            let keys = derive_ptk(&pmk, &ap.0, &client.0, &anonce(), &snonce());
+            let mic = compute_mic(&keys.kck, &m2);
+            m2[MIC_OFFSET..MIC_OFFSET + 16].copy_from_slice(&mic);
+        }
+        let m3 = build_eapol_key(
+            DESCRIPTOR_RSN,
+            pairwise(KEY_INFO_ACK | KEY_INFO_MIC | KEY_INFO_INSTALL | KEY_INFO_SECURE),
+            2,
+            &anonce(),
+            &[0u8; 16],
+        );
+        store.on_eapol(&m2, ap, client, Some(SSID), 1, 1);
+        store.on_eapol(&m3, ap, client, Some(SSID), 1, 2);
+        let handshake = store.get(ap, client).unwrap();
+        assert_eq!(handshake.quality(), HandshakeQuality::Complete);
+        let line = handshake.hc22000().expect("M2+M3 is crackable");
+        assert_eq!(line.split('*').last(), Some("02"), "message pair 02: {line}");
+        assert_eq!(handshake.verify_passphrase(PASS), Verification::MicValid);
+    }
+
+    #[test]
     fn classifies_all_four_messages() {
-        let m1 = build_eapol_key(DESCRIPTOR_RSN, KEY_INFO_ACK, 1, &anonce(), &[]);
+        let m1 = build_eapol_key(DESCRIPTOR_RSN, pairwise(KEY_INFO_ACK), 1, &anonce(), &[]);
         assert_eq!(
             EapolKey::parse(&m1).unwrap().message,
             HandshakeMessage::Message1
         );
 
-        let m2 = build_eapol_key(DESCRIPTOR_RSN, KEY_INFO_MIC, 1, &snonce(), &[]);
+        let m2 = build_eapol_key(DESCRIPTOR_RSN, pairwise(KEY_INFO_MIC), 1, &snonce(), &[]);
         assert_eq!(
             EapolKey::parse(&m2).unwrap().message,
             HandshakeMessage::Message2
@@ -594,7 +671,7 @@ mod tests {
 
         let m3 = build_eapol_key(
             DESCRIPTOR_RSN,
-            KEY_INFO_ACK | KEY_INFO_MIC | KEY_INFO_INSTALL | KEY_INFO_SECURE,
+            pairwise(KEY_INFO_ACK | KEY_INFO_MIC | KEY_INFO_INSTALL | KEY_INFO_SECURE),
             2,
             &anonce(),
             &[0u8; 16],
@@ -606,7 +683,7 @@ mod tests {
 
         let m4 = build_eapol_key(
             DESCRIPTOR_RSN,
-            KEY_INFO_MIC | KEY_INFO_SECURE,
+            pairwise(KEY_INFO_MIC | KEY_INFO_SECURE),
             2,
             &[0u8; 32],
             &[],
@@ -651,11 +728,11 @@ mod tests {
     fn rejects_truncated_and_non_eapol_frames() {
         assert!(EapolKey::parse(&[]).is_none());
         assert!(EapolKey::parse(&[0u8; 40]).is_none());
-        let mut wrong_type = build_eapol_key(DESCRIPTOR_RSN, KEY_INFO_MIC, 1, &snonce(), &[]);
+        let mut wrong_type = build_eapol_key(DESCRIPTOR_RSN, pairwise(KEY_INFO_MIC), 1, &snonce(), &[]);
         wrong_type[1] = 0; // EAP-Packet, not EAPOL-Key
         assert!(EapolKey::parse(&wrong_type).is_none());
         // Length field larger than the buffer.
-        let mut bad_len = build_eapol_key(DESCRIPTOR_RSN, KEY_INFO_MIC, 1, &snonce(), &[]);
+        let mut bad_len = build_eapol_key(DESCRIPTOR_RSN, pairwise(KEY_INFO_MIC), 1, &snonce(), &[]);
         bad_len[2..4].copy_from_slice(&4096u16.to_be_bytes());
         assert!(EapolKey::parse(&bad_len).is_none());
     }
@@ -664,18 +741,18 @@ mod tests {
     fn extracts_pmkid_from_message1_kde() {
         let mut kde = alloc::vec![0xDD, 0x14, 0x00, 0x0F, 0xAC, 0x04];
         kde.extend_from_slice(&[0xAA; 16]);
-        let m1 = build_eapol_key(DESCRIPTOR_RSN, KEY_INFO_ACK, 1, &anonce(), &kde);
+        let m1 = build_eapol_key(DESCRIPTOR_RSN, pairwise(KEY_INFO_ACK), 1, &anonce(), &kde);
         let parsed = EapolKey::parse(&m1).unwrap();
         assert_eq!(parsed.pmkid(), Some([0xAA; 16]));
         // Garbage key data must not panic or produce a PMKID.
-        let garbage = build_eapol_key(DESCRIPTOR_RSN, KEY_INFO_ACK, 1, &anonce(), &[0x00; 32]);
+        let garbage = build_eapol_key(DESCRIPTOR_RSN, pairwise(KEY_INFO_ACK), 1, &anonce(), &[0x00; 32]);
         assert_eq!(EapolKey::parse(&garbage).unwrap().pmkid(), None);
     }
 
     #[test]
     fn store_assembles_and_verifies_a_handshake() {
         let mut store: HandshakeStore<8> = HandshakeStore::new();
-        let m1 = build_eapol_key(DESCRIPTOR_RSN, KEY_INFO_ACK, 1, &anonce(), &[]);
+        let m1 = build_eapol_key(DESCRIPTOR_RSN, pairwise(KEY_INFO_ACK), 1, &anonce(), &[]);
         let m2 = signed_message2();
         store.on_eapol(&m1, AP, CLIENT, Some(SSID), 6, 100);
         store.on_eapol(&m2, AP, CLIENT, Some(SSID), 6, 110);
@@ -713,7 +790,7 @@ mod tests {
         let mut store: HandshakeStore<4> = HandshakeStore::new();
         let mut kde = alloc::vec![0xDD, 0x14, 0x00, 0x0F, 0xAC, 0x04];
         kde.extend_from_slice(&[0x5A; 16]);
-        let m1 = build_eapol_key(DESCRIPTOR_RSN, KEY_INFO_ACK, 1, &anonce(), &kde);
+        let m1 = build_eapol_key(DESCRIPTOR_RSN, pairwise(KEY_INFO_ACK), 1, &anonce(), &kde);
         let m2 = signed_message2();
         store.on_eapol(&m1, AP, CLIENT, Some(SSID), 6, 1);
         store.on_eapol(&m2, AP, CLIENT, Some(SSID), 6, 2);
@@ -743,7 +820,7 @@ mod tests {
     #[test]
     fn store_replaces_oldest_when_full_and_counts_drops() {
         let mut store: HandshakeStore<1> = HandshakeStore::new();
-        let m1 = build_eapol_key(DESCRIPTOR_RSN, KEY_INFO_ACK, 1, &anonce(), &[]);
+        let m1 = build_eapol_key(DESCRIPTOR_RSN, pairwise(KEY_INFO_ACK), 1, &anonce(), &[]);
         store.on_eapol(&m1, AP, CLIENT, Some(SSID), 6, 1_000);
         store.on_eapol(&m1, AP, MacAddr([1; 6]), Some(SSID), 6, 2_000);
         assert_eq!(store.len(), 1);
@@ -755,7 +832,7 @@ mod tests {
     fn unknown_messages_are_ignored() {
         let mut store: HandshakeStore<2> = HandshakeStore::new();
         // Neither ACK nor MIC: not part of a 4-way handshake.
-        let odd = build_eapol_key(DESCRIPTOR_RSN, 0, 1, &snonce(), &[]);
+        let odd = build_eapol_key(DESCRIPTOR_RSN, pairwise(0), 1, &snonce(), &[]);
         assert!(store.on_eapol(&odd, AP, CLIENT, Some(SSID), 6, 0).is_none());
         assert!(store.is_empty());
     }
@@ -763,6 +840,10 @@ mod tests {
 
 #[cfg(test)]
 mod export_review_regressions {
+    /// Regression frames are pairwise too.
+    fn pairwise(key_info: u16) -> u16 {
+        key_info | KEY_INFO_KEY_TYPE
+    }
     use super::*;
     #[test]
     fn malformed_key_data_and_short_declared_body_are_rejected() {
@@ -773,9 +854,9 @@ mod export_review_regressions {
     #[test]
     fn late_m4_does_not_replace_m2_mic_and_export_zeroes_mic() {
         let mut store:HandshakeStore<2>=HandshakeStore::new();let ap=MacAddr([1;6]);let client=MacAddr([2;6]);
-        let m1=build_eapol_key(DESCRIPTOR_RSN,KEY_INFO_ACK,1,&[1;32],&[]);
-        let mut m2=build_eapol_key(DESCRIPTOR_RSN,KEY_INFO_MIC,1,&[2;32],&[]);m2[81..97].fill(0xaa);
-        let mut m4=build_eapol_key(DESCRIPTOR_RSN,KEY_INFO_MIC,2,&[0;32],&[]);m4[81..97].fill(0xbb);
+        let m1=build_eapol_key(DESCRIPTOR_RSN,pairwise(KEY_INFO_ACK),1,&[1;32],&[]);
+        let mut m2=build_eapol_key(DESCRIPTOR_RSN,pairwise(KEY_INFO_MIC),1,&[2;32],&[]);m2[81..97].fill(0xaa);
+        let mut m4=build_eapol_key(DESCRIPTOR_RSN,pairwise(KEY_INFO_MIC),2,&[0;32],&[]);m4[81..97].fill(0xbb);
         store.on_eapol(&m1,ap,client,Some(b"Lab"),1,1);store.on_eapol(&m2,ap,client,Some(b"Lab"),1,2);store.on_eapol(&m4,ap,client,Some(b"Lab"),1,3);
         let h=store.get(ap,client).unwrap();assert_eq!(h.mic,[0xaa;16]);
         let line=h.hc22000().unwrap();let data=line.split('*').nth(7).unwrap();
