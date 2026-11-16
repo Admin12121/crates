@@ -173,10 +173,6 @@ fn set_status(status: &str) {
     });
 }
 
-fn set_busy(busy: bool) {
-    critical_section::with(|cs| WIFI_STATE.borrow_ref_mut(cs).busy = busy);
-}
-
 /// Snapshot for rendering.
 pub fn snapshot() -> (String, Vec<ApRow>, u32, u32) {
     critical_section::with(|cs| {
@@ -279,7 +275,7 @@ async fn capture_session(controller:&mut WifiController<'static>,channel:u8){
     monitor_session(controller,channel,CaptureFilter::default(),true,false).await;
 }
 async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filter:CaptureFilter,record:bool,stream:bool){
-    if Channel::new(channel).is_none(){set_status("channel must be 1..13");return}
+    if Channel::new(channel).is_err(){set_status("channel must be 1..13");return}
     if !disconnect(controller).await{return}
     if stop_requested(){set_status("capture cancelled");return}
     if let Err(e)=controller.set_channel(channel,SecondaryChannel::None){set_status(&alloc::format!("channel tune failed: {e:?}"));return}
@@ -362,8 +358,23 @@ async fn attack_session(controller: &mut WifiController<'static>, mode: AttackMo
 
 #[derive(Clone)]
 pub struct ClientRow{pub mac:MacAddr,pub bssid:Option<MacAddr>,pub channel:u8,pub rssi:i8,pub frames:u32}
+impl ClientRow{
+    /// One display line for the "Nearby clients" screen.
+    pub fn line(&self)->String{
+        let ap=match self.bssid {Some(bssid)=>alloc::format!("{bssid}"),None=>String::from("unknown AP")};
+        alloc::format!("{}  {}  ch {}  {} dBm  {} frames",self.mac,ap,self.channel,self.rssi,self.frames)
+    }
+}
 #[derive(Clone)]
 pub struct WpsRow{pub bssid:MacAddr,pub channel:u8,pub rssi:i8,pub configured:bool,pub selected_registrar:bool}
+impl WpsRow{
+    /// One display line for the "WPS information" screen.
+    pub fn line(&self)->String{
+        alloc::format!("{}  ch {}  {} dBm  {}{}",self.bssid,self.channel,self.rssi,
+            if self.configured{"configured"}else{"unconfigured"},
+            if self.selected_registrar{"  registrar selected"}else{""})
+    }
+}
 pub use cyberdeck_core::packet::passive::InspectorRow;
 pub struct PassiveSnapshot{pub aps:Vec<ApRow>,pub clients:Vec<ClientRow>,pub wps:Vec<WpsRow>,pub frames:Vec<InspectorRow>,pub eapol:u32,pub handshakes:u32,pub pmkids:u32,pub histogram:String}
 type Observer=PassiveEngine<24,32,8,12>;
@@ -378,7 +389,7 @@ pub fn passive_snapshot()->PassiveSnapshot{critical_section::with(|cs|{
 })}
 pub fn passive_hashes()->String{critical_section::with(|cs|OBSERVER.borrow_ref(cs).export_hashes())}
 
-async fn cancelled_or_timeout(id:u32,seconds:u64){let deadline=embassy_time::Instant::now()+embassy_time::Duration::from_secs(seconds);loop{if stop_requested()||embassy_time::Instant::now()>=deadline{return}embassy_time::Timer::after(embassy_time::Duration::from_millis(20)).await;}}
+async fn cancelled_or_timeout(_id:u32,seconds:u64){let deadline=embassy_time::Instant::now()+embassy_time::Duration::from_secs(seconds);loop{if stop_requested()||embassy_time::Instant::now()>=deadline{return}embassy_time::Timer::after(embassy_time::Duration::from_millis(20)).await;}}
 async fn disconnect(controller:&mut WifiController<'static>)->bool{
     match embassy_time::with_timeout(embassy_time::Duration::from_secs(3),controller.disconnect_async()).await{
         Ok(Ok(_))=>true,Ok(Err(e))=>{set_status(&alloc::format!("disconnect failed: {e:?}"));false},Err(_)=>{set_status("disconnect timeout");false}
@@ -387,7 +398,7 @@ async fn disconnect(controller:&mut WifiController<'static>)->bool{
 async fn connect_session(controller:&mut WifiController<'static>,id:u32,ssid:String,password:String){
     if !disconnect(controller).await{return}
     let Ok(name)=ssid.as_str().try_into()else{set_status("SSID exceeds 32 bytes");return};
-    let auth=if password.is_empty(){AuthenticationMethodConfig::None}else{
+    let auth=if password.is_empty(){AuthenticationMethodConfig::Open}else{
         let Ok(pass)=password.as_str().try_into()else{set_status("password exceeds driver limit");return};AuthenticationMethodConfig::Wpa2Personal(pass)
     };
     if let Err(e)=controller.set_config(&Config::Station(StationConfig::default().with_ssid(name).with_authentication(auth))){set_status(&alloc::format!("station config failed: {e:?}"));return}

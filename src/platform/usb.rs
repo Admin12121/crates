@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use critical_section::Mutex;
 use cyberdeck_core::hid::{Layout, ConsumerReport, KeyboardReport, MouseReport};
 use cyberdeck_core::hid::ducky;
-use cyberdeck_core::hid::engine::{HidEngine, Output, BUILTIN_SCRIPTS};
+use cyberdeck_core::hid::engine::{HidEngine, Output};
 use cyberdeck_core::hid::session::SessionQueue;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State as CdcState, Sender, Receiver};
@@ -185,7 +185,7 @@ pub fn submit(command: UsbCommand) -> bool {
 }
 fn current(token: u32) -> bool { critical_section::with(|cs| COMMAND.borrow_ref(cs).is_current(token)) }
 pub fn preview(index: u8) -> Option<String> {
-    BUILTIN_SCRIPTS.get(usize::from(index)).map(|(name, body)| alloc::format!("{name}\n{body}"))
+    super::payload::preview(index)
 }
 fn publish(status: &str, percent: u8, keystrokes: u32, unsupported: u32) {
     critical_section::with(|cs| {
@@ -238,8 +238,8 @@ async fn hid_loop<'d,D:Driver<'d>>(mut writer:HidWriter<'d,D,9>)->! {
                     }
                     other => {
                         let(index,layout)=match other {UsbCommand::RunPayload{index,layout}=>(index,layout),_=>(0,Layout::Us)};
-                        let Some((name,body))=BUILTIN_SCRIPTS.get(usize::from(index)) else {publish("Unknown payload",0,0,0);continue;};
-                        (String::from(*name),String::from(*body),layout)
+                        let Some((name,body))=super::payload::resolve(index) else {publish("Unknown payload",0,0,0);continue;};
+                        (name,body,layout)
                     }
                 };
                 match ducky::parse(&name,&body) {

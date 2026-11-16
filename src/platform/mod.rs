@@ -13,6 +13,7 @@ pub mod display;
 pub mod export;
 pub mod input;
 pub mod nrf24;
+pub mod payload;
 pub mod probe;
 pub mod sd;
 pub mod usb;

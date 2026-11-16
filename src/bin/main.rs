@@ -13,7 +13,7 @@ extern crate alloc;
 mod control;
 
 use bt_hci::controller::ExternalController;
-use cyberdeck_core::board::{self, BoardId, FIELD_PROFILE};
+use cyberdeck_core::board::{self, BoardId};
 use cyberdeck_core::hardware::{DeviceClass, DeviceState};
 use alloc::{rc::Rc, string::String, vec::Vec};
 use core::cell::RefCell;
@@ -30,6 +30,7 @@ use cyberdeck_firmware::platform::battery;
 use cyberdeck_firmware::platform::ble::{self, BleCommand};
 use cyberdeck_firmware::platform::display::Display;
 use cyberdeck_firmware::platform::export;
+use cyberdeck_firmware::platform::payload;
 use cyberdeck_firmware::platform::nrf24::Nrf24;
 use cyberdeck_firmware::platform::probe::ProbeReport;
 use cyberdeck_firmware::platform::sd::{self, SdBus};
@@ -161,6 +162,13 @@ impl<'d> RfRuntime<'d> {
         self.spectrum.envelope(&mut out);
         out
     }
+}
+
+/// Rebuild the payload picker from the built-in list plus any scripts on the card.
+fn refresh_payloads(app:&mut App){
+    let names=payload::names();
+    let references:Vec<&str>=names.iter().map(|name|name.as_str()).collect();
+    app.set_payloads(&references);
 }
 
 #[allow(
@@ -307,6 +315,8 @@ async fn main(spawner: Spawner) -> ! {
     } else { probe.record(DeviceClass::SdCard, Err("SPI3 configuration failed")); }
 
     // ---- USB HID (Wokwi only models USB CDC, not composite HID) ----
+    // Wokwi builds compile the USB actor out, so the binding is only mutated on hardware.
+    #[allow(unused_mut)]
     let mut usb_started = false;
     #[cfg(not(cyberdeck_sim_wokwi))]
     match usb_actor(esp_hal::usb::otg::Usb::new_fs(
@@ -341,6 +351,8 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     // ---- BLE radio (unsupported by Wokwi) ----
+    // Wokwi builds compile the BLE actor out, so the binding is only mutated on hardware.
+    #[allow(unused_mut)]
     let mut ble_started = false;
     #[cfg(not(cyberdeck_sim_wokwi))]
     match BleConnector::new(peripherals.BT, Default::default()) {
@@ -386,6 +398,8 @@ async fn main(spawner: Spawner) -> ! {
         probe.record(DeviceClass::Nrf24, Err("connect nRF24 using the FIELD profile"));
         None
     };
+    // Only the FIELD profile assigns this; the attribute keeps CORE/Wokwi quiet.
+    #[allow(unused_mut)]
     let mut gps_started = false;
     #[cfg(cyberdeck_board_field)]
     if let Some(pins) = profile.gps {
@@ -419,10 +433,12 @@ async fn main(spawner: Spawner) -> ! {
     let mut app = App::new(probe.registry);
     let flags=control::Flags{wifi:wifi_started,ble:ble_started,usb:usb_started,gps:gps_started,network:net_started};
     control::enable(&mut app,flags);
-    let payload_names:Vec<&str>=cyberdeck_core::hid::engine::BUILTIN_SCRIPTS.iter().map(|(name,_)|*name).collect();
-    app.set_payloads(&payload_names);
+    // Built-in demo scripts plus any `*.TXT` payloads on the card.
+    refresh_payloads(&mut app);
+    sd::request_payload_scan();
     let mut active_tool:Option<Tool>=None;
     let mut pending_rf:Option<(Tool,u64)>=None;
+    let mut last_payload_scan=0u64;
     let mut started_ms=0u64;
     let mut last_render_ms=0u64;
     let mut last_wardrive_scan=0u64;
@@ -487,6 +503,10 @@ async fn main(spawner: Spawner) -> ! {
             }else if status.contains("empty")||status.contains("failed")||status.contains("unavailable"){app.set_message(&status);file_action=None;}
         }
         rf.step(now_ms);
+        if payload::sync_from_storage(){refresh_payloads(&mut app);}
+        if app.wants_payloads()&&sd::ready()&&now_ms.saturating_sub(last_payload_scan)>=3000{
+            if sd::request_payload_scan(){last_payload_scan=now_ms;}
+        }
         if let Some((adc,pin,divider,last))=battery_adc.as_mut(){if now_ms.saturating_sub(*last)>=500{battery::publish(adc.read_blocking(pin),*divider);*last=now_ms;}}
         if active_tool==Some(Tool::GpsWardrive)&&now_ms.saturating_sub(last_wardrive_scan)>=10_000&&!wifi::busy(){wifi::submit(WifiCommand::Scan);last_wardrive_scan=now_ms;}
         if gps::detected()!=gps_seen {gps_seen=gps::detected();app.set_device_state(DeviceClass::Gps,if gps_seen{DeviceState::Ready}else{DeviceState::NotDetected},Some("UART NMEA receiver"));}
@@ -499,8 +519,14 @@ async fn main(spawner: Spawner) -> ! {
             let passive=wifi::passive_snapshot();
             let mut packet_lines=Vec::new();
             match active_tool {
-                Some(Tool::WifiClients)=>packet_lines.extend(passive.clients.clone()),
-                Some(Tool::WifiWps)=>packet_lines.extend(passive.wps.clone()),
+                Some(Tool::WifiClients)=>{
+                    packet_lines.extend(passive.clients.iter().map(|row|row.line()));
+                    if passive.clients.is_empty(){packet_lines.push(String::from("No stations observed yet."));}
+                },
+                Some(Tool::WifiWps)=>{
+                    packet_lines.extend(passive.wps.iter().map(|row|row.line()));
+                    if passive.wps.is_empty(){packet_lines.push(String::from("No WPS information elements observed yet."));}
+                },
                 Some(Tool::WifiHandshake)=>{packet_lines.push(alloc::format!("EAPOL {}  handshakes {}",passive.eapol,passive.handshakes));packet_lines.push(alloc::format!("PMKIDs {}",passive.pmkids));},
                 _=>{for frame in passive.frames.iter().take(4){packet_lines.push(frame.summary.clone());packet_lines.push(frame.metadata.clone());packet_lines.push(frame.hex.clone());}},
             }

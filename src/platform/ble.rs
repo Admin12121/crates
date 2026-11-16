@@ -123,7 +123,14 @@ fn record(raw:trouble_host::Address,rssi:i8,data:&[u8],connectable:bool) {
 struct Observer;
 impl EventHandler for Observer {
     fn on_adv_reports(&self,reports:bt_hci::param::LeAdvReportsIter) {
-        for report in reports {let Ok(report)=report else {continue;};record(trouble_host::Address::new(report.addr_kind,report.addr),report.rssi,report.data,report.event_kind.as_raw()<=1);}
+        for report in reports {
+            let Ok(report)=report else {continue;};
+            // `LeAdvEventKind` is a plain enum in bt-hci 0.9: no raw accessor exists.
+            // Kinds 0/1 (AdvInd, AdvDirectInd) are the connectable advertisements.
+            let connectable=matches!(&report.event_kind,
+                bt_hci::param::LeAdvEventKind::AdvInd|bt_hci::param::LeAdvEventKind::AdvDirectInd);
+            record(trouble_host::Address::new(report.addr_kind,report.addr),report.rssi,report.data,connectable);
+        }
     }
 }
 
@@ -192,7 +199,9 @@ async fn scan(stack:&BleStack<'_>,token:u32,active:bool,interval_ms:u16,window_m
 async fn advertise(stack:&BleStack<'_>,token:u32,campaign:SpamCampaign)->Result<(),&'static str> {
     set_status(campaign.label());critical_section::with(|cs|STATE.borrow_ref_mut(cs).frames=0);
     command(stack,token,LeSetAdvParams::new(HciDuration::from_millis(100),HciDuration::from_millis(100),AdvKind::AdvNonconnInd,AddrKind::RANDOM,AddrKind::PUBLIC,BdAddr::new([0;6]),AdvChannelMap::ALL,bt_hci::param::AdvFilterPolicy::Unfiltered)).await?;
-    let mut rotator=SpamRotator::new(campaign,esp_hal::rng::Rng::new().random());
+    // The rotator takes a 64-bit seed; one `random()` call only yields 32 bits.
+    let seed=(u64::from(esp_hal::rng::Rng::new().random())<<32)|u64::from(esp_hal::rng::Rng::new().random());
+    let mut rotator=SpamRotator::new(campaign,seed);
     let mut builder=cyberdeck_core::ble::ad::AdvBuilder::new();
     while current(token) {
         if !rotator.next_payload(&mut builder){break;}

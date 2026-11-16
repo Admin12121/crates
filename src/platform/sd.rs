@@ -5,6 +5,7 @@ use critical_section::Mutex;
 use embedded_hal::spi::{ErrorType,Operation,SpiBus,SpiDevice};
 use embedded_sdmmc::{Mode,SdCard,TimeSource,Timestamp,VolumeIdx,VolumeManager};
 use esp_hal::{Blocking,delay::Delay,gpio::Output,spi::{Error as SpiError,master::Spi}};
+use cyberdeck_core::hid::engine::{MAX_EXTERNAL_PAYLOAD_BYTES,MAX_EXTERNAL_PAYLOADS};
 use cyberdeck_core::packet::storage::{file_name,valid_file_name,pcap_snaplen,pcap_record_size};
 
 const QUEUE_DEPTH:usize=8;
@@ -17,12 +18,33 @@ impl<'d>SdBus<'d>{
     pub fn from_shared(spi:Rc<RefCell<Spi<'d,Blocking>>>,cs:Output<'d>)->Self{Self{spi,cs}}
 }
 impl ErrorType for SdBus<'_>{type Error=SpiError;}
+/// Full-duplex transfer for [`Operation::Transfer`].
+///
+/// esp-hal only offers an in-place transfer, so the outgoing bytes are staged in a
+/// small bounded buffer: send a chunk, capture what the card returned, repeat. Any
+/// trailing read-only bytes are clocked separately, which is what an SD data-in
+/// phase expects.
+fn full_duplex(spi:&mut Spi<'_,Blocking>,read:&mut[u8],write:&[u8])->Result<(),SpiError>{
+    const CHUNK:usize=32;
+    let mut staged=[0u8;CHUNK];
+    let shared=read.len().min(write.len());
+    let mut index=0;
+    while index<shared {
+        let len=(shared-index).min(CHUNK);
+        staged[..len].copy_from_slice(&write[index..index+len]);
+        spi.transfer(&mut staged[..len])?;
+        read[index..index+len].copy_from_slice(&staged[..len]);
+        index+=len;
+    }
+    if read.len()>shared {spi.read(&mut read[shared..])?;}
+    Ok(())
+}
 impl SpiDevice<u8> for SdBus<'_>{
     fn transaction(&mut self,operations:&mut[Operation<'_,u8>])->Result<(),SpiError>{
         let mut spi=self.spi.borrow_mut();self.cs.set_low();
         let result=operations.iter_mut().try_for_each(|op|match op{
             Operation::Read(data)=>spi.read(data),Operation::Write(data)=>spi.write(data),
-            Operation::Transfer(read,write)=>spi.transfer(read,write),
+            Operation::Transfer(read,write)=>full_duplex(&mut spi,read,write),
             Operation::TransferInPlace(data)=>spi.transfer_in_place(data),
             Operation::DelayNs(ns)=>{Delay::new().delay_nanos(*ns);Ok(())}
         });
@@ -38,9 +60,11 @@ pub struct WriteResult{pub ticket:u32,pub name:String,pub bytes:u64,pub success:
 struct StorageState{mounted:bool,status:String,files:u32,bytes:u64,library:Vec<FileRow>,preview:String,completed:VecDeque<WriteResult>,failed:Vec<String>}
 impl StorageState{const fn new()->Self{Self{mounted:false,status:String::new(),files:0,bytes:0,library:Vec::new(),preview:String::new(),completed:VecDeque::new(),failed:Vec::new()}}}
 pub struct Job{pub ticket:u32,pub name:String,pub append:bool,pub bytes:Vec<u8>}
-enum Request{Write(Job),List,Preview(String),Recover(String)}
+enum Request{Write(Job),List,Preview(String),Recover(String),Payloads}
 static STATE:Mutex<RefCell<StorageState>>=Mutex::new(RefCell::new(StorageState::new()));
 static JOBS:Mutex<RefCell<VecDeque<Request>>>=Mutex::new(RefCell::new(VecDeque::new()));
+/// Scanned HID payload scripts, handed to `platform::payload` exactly once.
+static SCANNED:Mutex<RefCell<Option<Vec<(String,String)>>>>=Mutex::new(RefCell::new(None));
 static NEXT:Mutex<RefCell<u32>>=Mutex::new(RefCell::new(0));
 static TICKET:Mutex<RefCell<u32>>=Mutex::new(RefCell::new(0));
 fn publish(status:&str,mounted:bool){critical_section::with(|cs|{let mut s=STATE.borrow_ref_mut(cs);s.mounted=mounted;s.status=String::from(status);});}
@@ -71,6 +95,10 @@ fn request(request:Request)->bool{critical_section::with(|cs|{
 pub fn request_list()->bool{request(Request::List)}
 pub fn request_preview(name:&str)->bool{valid_file_name(name)&&request(Request::Preview(String::from(name)))}
 pub fn request_recover(name:&str)->bool{valid_file_name(name)&&request(Request::Recover(String::from(name)))}
+/// Queue a scan for `*.TXT` HID payload scripts in the card root.
+pub fn request_payload_scan()->bool{request(Request::Payloads)}
+/// Take the most recent scan result, if the storage actor produced one.
+pub fn take_payloads()->Option<Vec<(String,String)>>{critical_section::with(|cs|SCANNED.borrow_ref_mut(cs).take())}
 pub fn next_name(stem:&str,extension:&str)->String{
     let index=critical_section::with(|cs|{let mut n=NEXT.borrow_ref_mut(cs);*n=n.saturating_add(1);*n});
     file_name(stem,extension,index).unwrap_or_default()
@@ -149,6 +177,49 @@ async fn recover<D:embedded_sdmmc::BlockDevice>(m:&Manager<D>,v:embedded_sdmmc::
     result?;closed_source?;closed?;dir?;
     Ok(alloc::format!("Recovered {output}: {records} records, {bytes} B; original kept"))
 }
+/// Payload scripts are plain text in the card root; captures use their own extensions.
+fn is_payload_file(name:&str)->bool{
+    name.get(name.len().saturating_sub(4)..).is_some_and(|extension|extension.eq_ignore_ascii_case(".TXT"))
+}
+/// Read one script, bounded by [`MAX_EXTERNAL_PAYLOAD_BYTES`]; invalid UTF-8 becomes
+/// replacement characters so the engine reports them as unsupported instead of failing.
+fn read_payload<D:embedded_sdmmc::BlockDevice>(m:&Manager<D>,v:embedded_sdmmc::RawVolume,name:&str)->Result<String,&'static str>{
+    let root=m.open_root_dir(v).map_err(|_|"directory open failed")?;
+    let file=match m.open_file_in_dir(root,name,Mode::ReadOnly){Ok(f)=>f,Err(_)=>{let _=m.close_dir(root);return Err("payload open failed")}};
+    let mut bytes=Vec::new();let mut buffer=[0u8;256];
+    let mut result=Ok(());
+    loop{
+        if bytes.len()>=MAX_EXTERNAL_PAYLOAD_BYTES{break}
+        match m.read(file,&mut buffer){
+            Ok(0)=>break,
+            Ok(n)=>{let room=MAX_EXTERNAL_PAYLOAD_BYTES-bytes.len();bytes.extend_from_slice(&buffer[..n.min(room)]);}
+            Err(_)=>{result=Err("payload read failed");break}
+        }
+    }
+    let closed=m.close_file(file).map_err(|_|"payload close failed");
+    let directory=m.close_dir(root).map_err(|_|"directory close failed");
+    result?;closed?;directory?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+fn scan_payloads<D:embedded_sdmmc::BlockDevice>(m:&Manager<D>,v:embedded_sdmmc::RawVolume)->Result<Vec<(String,String)>,&'static str>{
+    let root=m.open_root_dir(v).map_err(|_|"directory open failed")?;
+    let mut names:Vec<String>=Vec::new();
+    let scanned=m.iterate_dir(root,|entry|{
+        if entry.attributes.is_directory(){return}
+        let name=alloc::format!("{}",entry.name);
+        if !is_payload_file(&name){return}
+        // Bounded: a card cannot make the firmware allocate an unbounded list.
+        if names.len()<MAX_EXTERNAL_PAYLOADS{names.push(name);}
+    }).map_err(|_|"directory read failed");
+    let closed=m.close_dir(root).map_err(|_|"directory close failed");
+    scanned.and(closed)?;
+    names.sort();
+    let mut scripts=Vec::new();
+    for name in names{
+        if let Ok(text)=read_payload(m,v,&name){if !text.is_empty(){scripts.push((name,text));}}
+    }
+    Ok(scripts)
+}
 pub async fn run(bus:SdBus<'static>)->!{
     let card=SdCard::new(bus,Delay::new());let manager=VolumeManager::new(card,FixedClock);
     let volume=match manager.open_volume(VolumeIdx(0)){
@@ -173,6 +244,10 @@ pub async fn run(bus:SdBus<'static>)->!{
                 Request::List=>match list_files(&manager,v){Ok(files)=>{let count=files.len();critical_section::with(|cs|STATE.borrow_ref_mut(cs).library=files);publish(&alloc::format!("{count} files (max {MAX_FILES})"),true)},Err(e)=>publish(e,false)},
                 Request::Preview(name)=>match file_preview(&manager,v,&name){Ok(text)=>{critical_section::with(|cs|STATE.borrow_ref_mut(cs).preview=text);publish("preview loaded",true)},Err(e)=>publish(e,false)},
                 Request::Recover(name)=>match recover(&manager,v,&name).await{Ok(text)=>publish(&text,true),Err(e)=>publish(e,false)},
+                Request::Payloads=>match scan_payloads(&manager,v){
+                    Ok(scripts)=>{let count=scripts.len();critical_section::with(|cs|*SCANNED.borrow_ref_mut(cs)=Some(scripts));publish(&alloc::format!("{count} payload scripts on card"),true)},
+                    Err(e)=>publish(e,false),
+                },
             }}
         }
         embassy_time::Timer::after(embassy_time::Duration::from_millis(5)).await;

@@ -146,6 +146,13 @@ impl App {
     pub fn settings(&self)->Settings {self.settings}
     pub fn active_tool(&self)->Option<Tool> {if let Screen::Running(tool)=self.screen {Some(tool)} else {None}}
     pub fn usb_paused(&self)->bool {self.live.usb_paused}
+    /// True while a screen that lists payloads is visible, so storage can rescan it.
+    pub fn wants_payloads(&self)->bool {
+        matches!(self.screen,
+            Screen::Group(Group::UsbHid)
+            |Screen::Setup(Tool::HidIntro|Tool::HidDucky)
+            |Screen::Running(Tool::HidIntro|Tool::HidDucky))
+    }
     pub fn set_device_state(&mut self,class:DeviceClass,state:DeviceState,detail:Option<&str>) {self.registry.upsert(class,state,detail);self.needs_render=true;}
     pub fn network_credentials(&self)->(String,String) {(self.ssid.clone(),self.password.clone())}
     pub fn set_payloads(&mut self,names:&[&str]) {

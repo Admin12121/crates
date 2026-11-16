@@ -436,6 +436,44 @@ pub fn builtin_script(name: &str) -> Option<&'static str> {
         .map(|(_, body)| *body)
 }
 
+/// Upper bound on user payloads read from storage; bounds the firmware heap.
+pub const MAX_EXTERNAL_PAYLOADS: usize = 8;
+/// Upper bound on one user payload, in bytes.
+pub const MAX_EXTERNAL_PAYLOAD_BYTES: usize = 2048;
+
+/// Storage payloads that are safe to offer, in the order the UI indexes them.
+///
+/// One predicate for both the picker and the resolver, so a name can never be
+/// shown and then resolve to a different script (or to nothing).
+fn usable_external(external: &[(String, String)]) -> impl Iterator<Item = &(String, String)> {
+    external
+        .iter()
+        .filter(|(name, body)| {
+            !name.is_empty() && !body.is_empty() && body.len() <= MAX_EXTERNAL_PAYLOAD_BYTES
+        })
+        .take(MAX_EXTERNAL_PAYLOADS)
+}
+
+/// Display names for the payload picker: built-ins first, then storage payloads.
+pub fn payload_names(external: &[(String, String)]) -> Vec<String> {
+    let mut out: Vec<String> = BUILTIN_SCRIPTS
+        .iter()
+        .map(|(name, _)| String::from(*name))
+        .collect();
+    out.extend(usable_external(external).map(|(name, _)| name.clone()));
+    out
+}
+
+/// Resolve a picker index to `(name, script body)` across built-ins and storage.
+pub fn resolve_payload(index: usize, external: &[(String, String)]) -> Option<(String, String)> {
+    if let Some((name, body)) = BUILTIN_SCRIPTS.get(index) {
+        return Some((String::from(*name), String::from(*body)));
+    }
+    usable_external(external)
+        .nth(index - BUILTIN_SCRIPTS.len())
+        .map(|(name, body)| (name.clone(), body.clone()))
+}
+
 /// Validate a payload file name before it touches storage (no paths, no traversal).
 pub fn validate_payload_name(name: &str) -> Result<(), &'static str> {
     if name.is_empty() || name.len() > 64 {
@@ -661,6 +699,50 @@ mod tests {
         assert_eq!(engine.next_report(20), Some(Output::Consumer(ConsumerReport { usage: 0 })));
         assert!(matches!(engine.next_report(40), Some(Output::Mouse(_))));
         assert_eq!(engine.next_report(60), Some(Output::Mouse(MouseReport { buttons: 0, dx: 0, dy: 0, wheel: 0 })));
+    }
+
+    #[test]
+    fn storage_payloads_extend_the_builtin_catalogue() {
+        let external = alloc::vec![(String::from("my-script.txt"), String::from("STRING hi"))];
+        let names = payload_names(&external);
+        assert_eq!(names.len(), BUILTIN_SCRIPTS.len() + 1);
+        assert_eq!(names[0], "hid-test.txt", "built-ins stay first so old indices keep working");
+        assert_eq!(names[names.len() - 1], "my-script.txt");
+        let (name, body) = resolve_payload(BUILTIN_SCRIPTS.len(), &external).expect("storage payload resolves");
+        assert_eq!(name, "my-script.txt");
+        assert_eq!(body, "STRING hi");
+        assert!(resolve_payload(usize::MAX, &external).is_none());
+        assert_eq!(resolve_payload(0, &[]).map(|(name, _)| name), Some(String::from("hid-test.txt")));
+    }
+
+    #[test]
+    fn oversized_and_excess_storage_payloads_are_ignored_consistently() {
+        let mut external = alloc::vec![(
+            String::from("too-big.txt"),
+            "x".repeat(MAX_EXTERNAL_PAYLOAD_BYTES + 1),
+        )];
+        for index in 0..(MAX_EXTERNAL_PAYLOADS + 3) {
+            external.push((alloc::format!("p{index}.txt"), String::from("ENTER")));
+        }
+        let names = payload_names(&external);
+        assert_eq!(names.len(), BUILTIN_SCRIPTS.len() + MAX_EXTERNAL_PAYLOADS);
+        assert!(!names.iter().any(|name| name == "too-big.txt"), "oversized scripts never reach the picker");
+        // The last accepted index resolves, the next one does not.
+        let last = BUILTIN_SCRIPTS.len() + MAX_EXTERNAL_PAYLOADS - 1;
+        assert!(resolve_payload(last, &external).is_some());
+        assert!(resolve_payload(last + 1, &external).is_none());
+    }
+
+    #[test]
+    fn empty_storage_payloads_are_not_offered() {
+        let external = alloc::vec![
+            (String::from(""), String::from("ENTER")),
+            (String::from("blank.txt"), String::new()),
+            (String::from("good.txt"), String::from("ENTER")),
+        ];
+        let names = payload_names(&external);
+        assert_eq!(names.len(), BUILTIN_SCRIPTS.len() + 1);
+        assert_eq!(names[names.len() - 1], "good.txt");
     }
 
 }
