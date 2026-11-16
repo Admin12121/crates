@@ -39,6 +39,15 @@ pub fn save_wifi_hashes(hashes: &str) -> bool {
     sd::enqueue(&name, hashes.as_bytes().to_vec(), false)
 }
 
+/// G01: credentials submitted to the Evil Twin portal (header-only means none).
+pub fn save_portal_credentials(csv: &str) -> bool {
+    if csv.lines().count() <= 1 {
+        return false;
+    }
+    let name = sd::next_name("PORTAL", "CSV");
+    sd::enqueue(&name, csv.as_bytes().to_vec(), false)
+}
+
 /// G03: observed BLE devices, radio class and RSSI, plus any GATT read.
 pub fn save_ble_history(devices: &[BleDevice], frames: u32, gatt: &[String]) -> bool {
     if devices.is_empty() && gatt.is_empty() {

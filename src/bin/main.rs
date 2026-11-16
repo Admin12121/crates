@@ -168,6 +168,7 @@ impl<'d> RfRuntime<'d> {
 /// scan that ends by itself still leaves its findings on the card.
 fn export_findings(tool:Option<Tool>,rf:&RfRuntime<'_>){
     if tool==Some(Tool::WifiScan){let(_,aps,_,_)=wifi::snapshot();let _=export::save_wifi_findings(&aps);}
+    if tool==Some(Tool::WifiEvilTwin){let _=export::save_portal_credentials(&wifi::portal_csv());}
     if matches!(tool,Some(Tool::WifiScan|Tool::WifiCapture|Tool::WifiHandshake|Tool::WifiWps|Tool::WifiClients)){
         let _=export::save_wifi_hashes(&wifi::passive_hashes());
     }

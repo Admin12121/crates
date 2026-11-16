@@ -32,6 +32,9 @@ pub struct BleDevice {
     pub rssi: i8,
     pub kind: &'static str,
     pub detail: String,
+    /// Uptime of the most recent advertisement from this device, used by
+    /// wardriving to correlate a sighting with the nearest GPS fix.
+    pub seen: u64,
     raw: trouble_host::Address,
 }
 pub struct BleState {
@@ -108,18 +111,30 @@ where BleController:ControllerCmdSync<T> {
 }
 fn record(raw:trouble_host::Address,rssi:i8,data:&[u8],connectable:bool) {
     if !SCANNING.load(Ordering::Acquire) || !current(SCAN_TOKEN.load(Ordering::Acquire)) {return;}
-    let report=AdvReport::parse(BleAddress::new(raw.addr.into_inner()),rssi,data,connectable,Instant::now().as_millis());
+    let now=Instant::now().as_millis();
+    let report=AdvReport::parse(BleAddress::new(raw.addr.into_inner()),rssi,data,connectable,now);
     let matched=classify(&report);
     let detail=alloc::format!("{}; {} AD bytes; {} address",matched.vendor,data.len(),if raw.kind.as_raw()&1!=0{"random"}else{"public"});
     critical_section::with(|cs| {
         let mut s=STATE.borrow_ref_mut(cs);s.frames=s.frames.saturating_add(1);
         if let Some(slot)=s.devices.iter_mut().find(|d|d.raw==raw) {
-            slot.rssi=rssi;if let Some(name)=report.name {slot.name=name;}
+            slot.rssi=rssi;slot.seen=now;if let Some(name)=report.name {slot.name=name;}
             slot.kind=matched.kind.label();slot.detail=detail;return;
         }
         if s.devices.len()>=MAX_DEVICES {s.devices.remove(0);}
-        s.devices.push(BleDevice{address:alloc::format!("{raw}"),name:report.name.unwrap_or_default(),rssi,kind:matched.kind.label(),detail,raw});
+        s.devices.push(BleDevice{address:alloc::format!("{raw}"),name:report.name.unwrap_or_default(),rssi,kind:matched.kind.label(),detail,seen:now,raw});
     });
+}
+
+/// Devices paired with their last-seen uptime, freshest first, so wardriving
+/// can correlate a BLE sighting with the GPS fix nearest to that sighting.
+pub fn timed_devices()->Vec<(BleDevice,u64)>{
+    critical_section::with(|cs|{
+        let s=STATE.borrow_ref(cs);
+        let mut rows:Vec<(BleDevice,u64)>=s.devices.iter().map(|d|(d.clone(),d.seen)).collect();
+        rows.sort_by_key(|(_,seen)|core::cmp::Reverse(*seen));
+        rows
+    })
 }
 struct Observer;
 impl EventHandler for Observer {
