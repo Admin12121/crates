@@ -237,6 +237,57 @@ impl Canvas for Display<'_> {
         self.height
     }
 
+    fn draw_bitmap(&mut self, x: i16, y: i16, src_w: u16, src_h: u16, dst_w: u16, dst_h: u16, pixels: &[u8]) {
+        if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+            return;
+        }
+        let samples = usize::from(src_w) * usize::from(src_h);
+        if pixels.len() < samples * 2 {
+            return;
+        }
+        let sample = |sx: usize, sy: usize| -> u16 {
+            let at = (sy * usize::from(src_w) + sx) * 2;
+            u16::from_be_bytes([pixels[at], pixels[at + 1]])
+        };
+        for row in 0..u32::from(dst_h) {
+            let py = y + row as i16;
+            if py < 0 || py >= self.height as i16 {
+                continue;
+            }
+            let sy = (row * u32::from(src_h) / u32::from(dst_h)) as usize;
+            // Consecutive opaque pixels share one windowed write; the
+            // transparent key splits each row into a handful of runs.
+            let mut run: Option<u32> = None; // first column of the open run
+            for column in 0..=u32::from(dst_w) {
+                let transparent = if column < u32::from(dst_w) {
+                    let sx = (column * u32::from(src_w) / u32::from(dst_w)) as usize;
+                    sample(sx, sy) == 0x0001
+                } else {
+                    true // sentinel: flush a run that reaches the right edge
+                };
+                match (run, transparent) {
+                    (None, false) => run = Some(column),
+                    (Some(start), true) => {
+                        run = None;
+                        let len = column - start;
+                        self.cs.set_low();
+                        let rect = Rect::new(x + start as i16, py, len as u16, 1);
+                        if self.set_window_held(rect).is_ok() {
+                            let mut sink = PixelSink::new(&mut self.spi);
+                            for step in 0..len {
+                                let sx = ((start + step) * u32::from(src_w) / u32::from(dst_w)) as usize;
+                                sink.push(sample(sx, sy).to_be_bytes());
+                            }
+                            sink.flush();
+                        }
+                        self.cs.set_high();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     fn fill_rect(&mut self, rect: Rect, color: Rgb565) {
         if rect.w == 0 || rect.h == 0 {
             return;

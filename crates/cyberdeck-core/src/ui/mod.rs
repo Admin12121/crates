@@ -47,7 +47,7 @@ pub mod theme {
     pub const SURFACE_ALT: Rgb565 = Rgb565::rgb(0x21, 0x2A, 0x35);
     pub const TEXT: Rgb565 = Rgb565::rgb(0xE6, 0xED, 0xF3);
     pub const TEXT_DIM: Rgb565 = Rgb565::rgb(0x8B, 0x97, 0xA6);
-    pub const ACCENT: Rgb565 = Rgb565::rgb(0x35, 0xB6, 0xFF);
+    pub const ACCENT: Rgb565 = Rgb565::rgb(0xFF, 0x8A, 0x00);
     pub const SUCCESS: Rgb565 = Rgb565::rgb(0x3F, 0xD6, 0x7A);
     pub const WARNING: Rgb565 = Rgb565::rgb(0xF5, 0xB3, 0x3C);
     pub const DANGER: Rgb565 = Rgb565::rgb(0xF2, 0x5F, 0x5F);
@@ -143,6 +143,13 @@ pub trait Canvas {
     fn draw_vline(&mut self, x: i16, y: i16, h: u16, color: Rgb565) {
         self.fill_rect(Rect::new(x, y, 1, h), color);
     }
+
+    /// Blit a raw RGB565 bitmap (row-major, big-endian pixel pairs) scaled
+    /// from `src_w x src_h` to `dst_w x dst_h` (nearest neighbor). The pixel
+    /// value 0x0001 is transparent. Default: this canvas cannot blit.
+    #[allow(clippy::too_many_arguments, reason = "source and destination geometry plus the pixel buffer")]
+    #[allow(clippy::too_many_arguments, reason = "source and destination geometry plus the pixel buffer")]
+    fn draw_bitmap(&mut self, _x: i16, _y: i16, _src_w: u16, _src_h: u16, _dst_w: u16, _dst_h: u16, _pixels: &[u8]) {}
 
     /// Push the framebuffer/backlight update, if the driver buffers.
     fn present(&mut self) {}

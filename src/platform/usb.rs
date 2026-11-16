@@ -361,9 +361,8 @@ async fn cdc_receive<'d,D:Driver<'d>>(mut receiver:Receiver<'d,D>)->! {
 pub async fn run(usb:esp_hal::usb::otg::Usb<'static>)->! {
     let mut ep_out_buffer=[0;256];
     let driver=esp_hal::usb::otg::embassy_usb_device::Driver::new(usb,&mut ep_out_buffer,esp_hal::usb::otg::embassy_usb_device::Config::default());
-    // The KEYBOARD_CDC profile is what this build enumerates (HID keyboard +
-    // mouse + consumer, CDC console/streaming). Switching identities mid-run
-    // would need re-enumeration, which embassy-usb cannot do after build().
+    // The HID_CDC profile is what this build enumerates. Identity switching
+    // needs re-enumeration, which embassy-usb cannot do after build().
     let profile=cyberdeck_core::hid::UsbProfile::HID_CDC;
     let mut config=UsbConfig::new(profile.vendor_id,profile.product_id);
     config.manufacturer=Some(profile.manufacturer);config.product=Some(profile.product);config.serial_number=Some(profile.serial);

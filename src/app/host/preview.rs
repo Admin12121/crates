@@ -41,6 +41,22 @@ impl Canvas for Image {
             }
         }
     }
+    fn draw_bitmap(&mut self,x:i16,y:i16,src_w:u16,src_h:u16,dst_w:u16,dst_h:u16,pixels:&[u8]){
+        for row in 0..u32::from(dst_h) {
+            for column in 0..u32::from(dst_w) {
+                let sx=(column*u32::from(src_w)/u32::from(dst_w)) as usize;
+                let sy=(row*u32::from(src_h)/u32::from(dst_h)) as usize;
+                let at=(sy*usize::from(src_w)+sx)*2;
+                if at+1>=pixels.len() {continue;}
+                let value=u16::from_be_bytes([pixels[at],pixels[at+1]]);
+                if value==0x0001 {continue;}
+                let color=Rgb565(value);
+                let (r,g,b)=color.components();
+                let px=(y as usize+row as usize)*usize::from(self.width)+(x as usize+column as usize);
+                if x>=0 && y>=0 && px*3+2<self.pixels.len() {self.pixels[px*3..px*3+3].copy_from_slice(&[r,g,b]);}
+            }
+        }
+    }
     fn draw_glyph(&mut self,x:i16,y:i16,ch:char,fg:Rgb565,bg:Rgb565,scale:u8){
         let scale=scale.max(1);self.fill_rect(Rect::new(x,y,u16::from(font::ADVANCE)*u16::from(scale),u16::from(font::GLYPH_H)*u16::from(scale)),bg);
         for (column,bits) in font::glyph(ch).iter().enumerate(){for row in 0..7{if bits&(1<<row)!=0 {self.fill_rect(Rect::new(x+column as i16*i16::from(scale),y+row*i16::from(scale),u16::from(scale),u16::from(scale)),fg);}}}
@@ -74,6 +90,9 @@ fn render(app:&mut App,width:u16,height:u16,path:&Path)->io::Result<()> {let mut
 fn main()->io::Result<()> {
     let output=std::env::args_os().nth(1).ok_or_else(||io::Error::new(io::ErrorKind::InvalidInput,"usage: ui-preview OUTPUT_DIRECTORY"))?;
     let output=Path::new(&output);fs::create_dir_all(output)?;
+    // Splash: what the device shows for ~2.6 s at power-on.
+    let mut splash=App::new(registry());splash.enter_splash(0);splash.splash_tick(1900);splash.set_live(live());
+    render(&mut splash,240,320,&output.join("splash-240x320.png"))?;
     // Home tiles carry live counters, so seed them like the running device does.
     let mut home=App::new(registry());home.set_live(live());render(&mut home,240,320,&output.join("home-240x320.png"))?;
     let mut small=App::new(registry());small.set_live(live());render(&mut small,128,160,&output.join("home-128x160.png"))?;

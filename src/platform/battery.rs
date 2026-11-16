@@ -58,6 +58,11 @@ fn snapshot() -> Option<(u16, u8)> {
     })
 }
 
+/// Latest pack percentage, for the footer battery icon.
+pub fn percent() -> Option<u8> {
+    snapshot().map(|(_, percent)| percent)
+}
+
 /// One diagnostics line, e.g. `BAT 3.92 V 62%`; below 10% it says LOW.
 pub fn status_line() -> String {
     match snapshot() {

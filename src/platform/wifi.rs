@@ -363,6 +363,7 @@ async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filt
     }else{None};
     let mut sniffer=controller.sniffer();sniffer.set_receive_cb(receive);
     if let Err(e)=sniffer.set_promiscuous_mode(true){if stream{super::usb::pcap_finish();}set_status(&alloc::format!("Wi-Fi listener unavailable: {e:?}"));return}
+    let mut current_channel=initial_channel.get();
     set_status(&observe_status(channel==0,initial_channel.get(),&filter,respond));
     // KARMA identity: a random locally-administered unicast address, so
     // devices see one consistent "network" answering their name requests.
@@ -390,7 +391,7 @@ async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filt
                                 && !ssid.is_empty(){
                                     let known=replied.iter_mut().find(|(c,s,_)|*c==client&&s.as_slice()==ssid);
                                     if known.as_ref().map(|entry|entry.2<3).unwrap_or(true){
-                                        let response=frame::probe_response(client,MacAddr::new(karma_mac),ssid,f.channel,false);
+                                        let response=frame::probe_response(client,MacAddr::new(karma_mac),ssid,current_channel,false);
                                         let _=sniffer.send_raw_frame(false,response.as_slice(),true);
                                         match known{Some(entry)=>entry.2+=1,None=>{
                                             if replied.len()>=32{replied.remove(0);}
@@ -406,10 +407,16 @@ async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filt
                 }
             if stop_requested(){break 'session}
         }
+        if critical_section::with(|cs|RX.borrow_ref(cs).head==RX.borrow_ref(cs).tail){
+            // Ring drained: yield so the UI and storage never starve. Pending
+            // frames are drained without the sleep.
+            embassy_time::Timer::after(embassy_time::Duration::from_millis(10)).await;
+        }
         if channel==0
             && let Some(next)=hopper.poll(session_start.elapsed().as_millis()){
                 let primary=next.get();
-                if let Err(e)=controller.set_channel(primary,SecondaryChannel::None){error=Some(alloc::format!("channel tune failed: {e:?}"));break 'session}
+                if let Err(e)=controller.set_channel(primary,SecondaryChannel::None){error=Some(alloc::format!("Could not set the channel: {e:?}"));break 'session}
+                current_channel=primary;
                 critical_section::with(|cs|WIFI_STATE.borrow_ref_mut(cs).channel=primary);
                 set_status(&observe_status(true,primary,&filter,respond));
             }
@@ -417,7 +424,6 @@ async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filt
         if last_publish.elapsed()>=embassy_time::Duration::from_millis(250){
             let rows=passive_aps();critical_section::with(|cs|WIFI_STATE.borrow_ref_mut(cs).aps=rows);last_publish=embassy_time::Instant::now();
         }
-        embassy_time::Timer::after(embassy_time::Duration::from_millis(10)).await;
     }
     let disabled=sniffer.set_promiscuous_mode(false);drop(sniffer);
     set_status("Stopping. Saving results...");

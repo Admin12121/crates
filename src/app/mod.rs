@@ -1,4 +1,6 @@
 //! Device navigation and Canvas rendering. Drivers only run in response to Action.
+pub mod assets;
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -102,7 +104,7 @@ pub struct Live {
     pub rf_envelope:Vec<u8>,pub rf_waterfall:Vec<u8>,pub rf_peak:u8,pub rf_packets:u32,pub rf_dropped:u32,
     pub ble_status:String,pub ble_devices:Vec<BleDevice>,pub ble_frames:u32,
     pub usb_status:String,pub usb_percent:u8,pub usb_keystrokes:u32,pub usb_unsupported:u32,pub usb_paused:bool,
-    pub buttons:[bool;5],pub probe_lines:Vec<String>,pub message:Option<String>,
+    pub buttons:[bool;5],pub probe_lines:Vec<String>,pub message:Option<String>,pub battery:Option<u8>,pub tick:u8,
     pub gps_lines:Vec<String>,pub net_lines:Vec<String>,pub packet_lines:Vec<String>,pub result_lines:Vec<String>,
     pub usb_preview:Vec<String>,pub capture_files:Vec<String>,pub export_status:Option<String>,
 }
@@ -122,7 +124,7 @@ impl Live {
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Screen { Home, Group(Group), Setup(Tool), Running(Tool), Results(Tool), Unavailable(Tool), Edit(Tool,bool), Diagnostics }
+enum Screen { Splash, Home, Group(Group), Setup(Tool), Running(Tool), Results(Tool), Unavailable(Tool), Edit(Tool,bool), Diagnostics }
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 enum Field { Run, Channel, Filter, Layout, Payload, Target, Stream, Network, Ssid, Password, Previous, RfRate, RfLength, FileRecover, Campaign }
 pub struct App {
@@ -130,10 +132,52 @@ pub struct App {
     registry:PeripheralRegistry,live:Live,settings:Settings,availability:Vec<(Tool,Option<String>)>,payloads:Vec<String>,
     ssid:String,password:String,edit_text:String,edit_char:u8,
     results:Option<(Tool,Live)>,needs_render:bool,last_rendered:Option<Screen>,last_selection:usize,last_page:usize,last_notice:bool,columns:usize,
+    splash_start:u64,splash_elapsed:u64,splash_reveal:usize,
 }
 impl App {
     pub fn new(registry:PeripheralRegistry)->Self {
-        Self {screen:Screen::Home,home_index:0,tool_index:0,setup_index:0,scroll:0,registry,live:Live::default(),settings:Settings::default(),availability:Vec::new(),payloads:Vec::new(),ssid:String::new(),password:String::new(),edit_text:String::new(),edit_char:b'a',results:None,needs_render:true,last_rendered:None,last_selection:0,last_page:usize::MAX,last_notice:false,columns:36}
+        Self {screen:Screen::Home,splash_start:0,splash_elapsed:0,splash_reveal:0,home_index:0,tool_index:0,setup_index:0,scroll:0,registry,live:Live::default(),settings:Settings::default(),availability:Vec::new(),payloads:Vec::new(),ssid:String::new(),password:String::new(),edit_text:String::new(),edit_char:b'a',results:None,needs_render:true,last_rendered:None,last_selection:0,last_page:usize::MAX,last_notice:false,columns:36}
+    }
+    /// Show the boot splash; `splash_tick` drives its reveal and auto-dismiss.
+    pub fn enter_splash(&mut self,now:u64) {
+        self.screen=Screen::Splash;self.splash_start=now;self.splash_elapsed=0;self.splash_reveal=0;self.needs_render=true;
+    }
+    pub fn splash_active(&self)->bool {self.screen==Screen::Splash}
+    pub fn splash_tick(&mut self,now:u64) {
+        if self.screen!=Screen::Splash {return;}
+        self.splash_elapsed=now.saturating_sub(self.splash_start);
+        // One boot line every 120 ms after the logo has had a moment on screen.
+        self.splash_reveal=usize::try_from(self.splash_elapsed.saturating_sub(300)/120).unwrap_or(usize::MAX);
+        self.needs_render=true;
+        if self.splash_elapsed>=2600 {self.screen=Screen::Home;self.needs_render=true;}
+    }
+    /// Per-category accent color.
+    fn group_accent(group:Group)->Rgb565 {
+        match group {
+            Group::Wifi=>Rgb565::rgb(0,190,255),
+            Group::Packet=>Rgb565::rgb(0,230,118),
+            Group::Ble=>Rgb565::rgb(187,134,252),
+            Group::UsbHid=>Rgb565::rgb(255,193,7),
+            Group::Rf=>Rgb565::rgb(255,87,34),
+            Group::Gps=>Rgb565::rgb(105,240,174),
+            Group::Network=>Rgb565::rgb(64,158,255),
+        }
+    }
+    /// The boot probe checklist in first-boot order: (passed, short label).
+    fn boot_lines(&self)->Vec<(bool,String)> {
+        const ORDER:[(DeviceClass,&str);9]=[
+            (DeviceClass::Display,"DISPLAY"),(DeviceClass::Input,"INPUT"),(DeviceClass::BatteryAdc,"BATTERY"),
+            (DeviceClass::WifiRadio,"WI-FI"),(DeviceClass::SdCard,"SD CARD"),(DeviceClass::UsbDevice,"USB"),
+            (DeviceClass::BleRadio,"BLUETOOTH"),(DeviceClass::Nrf24,"NRF24"),(DeviceClass::Gps,"GPS"),
+        ];
+        let mut out=Vec::new();
+        for (class,label) in ORDER {
+            if let Some(state)=self.registry.state(class) {
+                let ok=matches!(state,DeviceState::Ready);
+                out.push((ok,alloc::format!("[{}] {}",if ok {"OK"}else{"--"},label)));
+            }
+        }
+        out
     }
     pub fn settings(&self)->Settings {self.settings}
     pub fn active_tool(&self)->Option<Tool> {if let Screen::Running(tool)=self.screen {Some(tool)} else {None}}
@@ -264,6 +308,7 @@ impl App {
         use crate::platform::Button;
         self.needs_render=true;
         match self.screen {
+            Screen::Splash=>{self.screen=Screen::Home;}
             Screen::Home=>match button {
                 Button::Down=>self.home_index=(self.home_index+1)%8,Button::Up=>self.home_index=(self.home_index+7)%8,
                 Button::Select=>{self.scroll=0;self.tool_index=0;self.screen=if self.home_index<7 {Screen::Group(GROUPS[self.home_index])}else{Screen::Diagnostics};},
@@ -443,15 +488,38 @@ impl App {
     }
     fn footer_y(canvas:&impl Canvas)->i16 {canvas.height().saturating_sub(20) as i16}
     fn bottom(&self,canvas:&impl Canvas)->i16 {Self::footer_y(canvas)-if self.live.message.is_some() {32}else{4}}
+    /// The module this screen belongs to, for the accent underline.
+    fn screen_group(&self)->Option<Group> {
+        match self.screen {
+            Screen::Group(group)=>Some(group),
+            Screen::Setup(tool)|Screen::Running(tool)|Screen::Results(tool)|Screen::Unavailable(tool)=>Some(tool.group()),
+            _=>None,
+        }
+    }
     fn header(&self,canvas:&mut impl Canvas,title:&str,subtitle:&str) {
         let width=canvas.width();
         canvas.fill_rect(Rect::new(0,0,width,44.min(canvas.height())),theme::SURFACE);
         let scale=if title.chars().count()*12<=usize::from(width.saturating_sub(16)){2}else{1};
         // A screen without a subtitle centres its title instead of leaving a gap.
         let y=if subtitle.is_empty(){15}else{10};
-        Self::text(canvas,8,y,width.saturating_sub(16),title,theme::TEXT,theme::SURFACE,scale);
-        if !subtitle.is_empty(){Self::text(canvas,8,31,width.saturating_sub(16),subtitle,theme::TEXT_DIM,theme::SURFACE,1);}
+        // Reserve the right edge for the battery pill so long titles never collide.
+        let title_room=width.saturating_sub(52);
+        Self::text(canvas,8,y,title_room,title,theme::TEXT,theme::SURFACE,scale);
+        if !subtitle.is_empty(){Self::text(canvas,8,31,width.saturating_sub(52),subtitle,theme::TEXT_DIM,theme::SURFACE,1);}
+        if let Some(percent)=self.live.battery {
+            let bx=width.saturating_sub(34) as i16;let by=10;
+            let level=if percent<=10 {theme::DANGER}else if percent<=35 {theme::WARNING}else{theme::SUCCESS};
+            canvas.fill_rect(Rect::new(bx,by,20,10),theme::TEXT_DIM);
+            canvas.fill_rect(Rect::new(bx+1,by+1,18,8),theme::SURFACE);
+            canvas.fill_rect(Rect::new(bx+20,by+2,2,6),theme::TEXT_DIM);
+            let fill=(u16::from(percent)*18/100).min(18);
+            if fill>0 {canvas.fill_rect(Rect::new(bx+1,by+1,fill,8),level);}
+        }
         canvas.draw_hline(0,43,width,theme::SURFACE_ALT);
+        // Category accent underline on every screen that belongs to a module.
+        if let Some(group)=self.screen_group() {
+            canvas.fill_rect(Rect::new(0,44,width,2),Self::group_accent(group));
+        }
     }
     /// Thin scroll indicator for paged lists: shape instead of words.
     fn page_indicator(canvas:&mut impl Canvas,page:usize,pages:usize,top:i16,bottom:i16) {
@@ -490,21 +558,25 @@ impl App {
     /// Selection moves repaint only old/new cards unless the page changed.
     pub fn render(&mut self,canvas:&mut impl Canvas) {
         self.columns=usize::from(canvas.width().saturating_sub(24)/6).max(1);
+        if self.screen==Screen::Splash {self.render_splash(canvas);self.last_rendered=Some(self.screen);self.last_selection=0;self.last_page=0;self.last_notice=false;return;}
         let changed=self.last_rendered!=Some(self.screen)||self.last_notice!=self.live.message.is_some();
         if changed {canvas.fill_rect(Rect::new(0,0,canvas.width(),canvas.height()),theme::BACKGROUND);}
+        let spinner=['/','-','\\','|'][usize::from(self.live.tick)%4];
         let (title,subtitle)=match self.screen {
-            Screen::Home=>(cyberdeck_core::DEVICE_NAME,""),
-            Screen::Group(group)=>(group.title(),""),
-            Screen::Setup(tool)=>(tool.title(),"SETTINGS"),
-            Screen::Running(tool)=>(tool.title(),if self.live.usb_paused{"PAUSED"}else{"LIVE"}),
-            Screen::Results(tool)=>(tool.title(),"RESULTS"),
-            Screen::Unavailable(tool)=>(tool.title(),"CAN'T START"),
-            Screen::Edit(_,password)=>(if password{"PASSWORD"}else{"NETWORK NAME"},""),
-            Screen::Diagnostics=>("Diagnostics",""),
+            Screen::Splash=>(String::new(),String::new()),
+            Screen::Home=>(cyberdeck_core::DEVICE_NAME.into(),String::new()),
+            Screen::Group(group)=>(group.title().into(),String::new()),
+            Screen::Setup(tool)=>(tool.title().into(),String::from("SETTINGS")),
+            Screen::Running(tool)=>(tool.title().into(),if self.live.usb_paused{String::from("PAUSED")}else{alloc::format!("{spinner} LIVE")}),
+            Screen::Results(tool)=>(tool.title().into(),String::from("RESULTS")),
+            Screen::Unavailable(tool)=>(tool.title().into(),String::from("CAN'T START")),
+            Screen::Edit(_,password)=>((if password{"PASSWORD"}else{"NETWORK NAME"}).into(),String::new()),
+            Screen::Diagnostics=>(String::from("Diagnostics"),String::new()),
         };
-        self.header(canvas,title,subtitle);
+        self.header(canvas,&title,&subtitle);
         let mut selection=0;let mut page=0;
         match self.screen {
+            Screen::Splash=>{}
             Screen::Home=>{
                 selection=self.home_index;
                 let columns=if canvas.width()>=200{2}else{1};
@@ -520,9 +592,11 @@ impl App {
                     let x=8+(slot%columns) as i16*(tile_w as i16+gap as i16);let y=50+(slot/columns) as i16*58;
                     let selected=index==self.home_index;
                     let bg=if selected{theme::SURFACE_ALT}else{theme::SURFACE};
+                    let accent=if index<7 {Self::group_accent(GROUPS[index])}else{theme::TEXT_DIM};
                     canvas.fill_rect(Rect::new(x,y,tile_w,52),bg);
-                    if selected {canvas.fill_rect(Rect::new(x,y,2,52),theme::TEXT);}
+                    if selected {canvas.fill_rect(Rect::new(x,y,2,52),accent);}
                     let label=if index<7 {GROUPS[index].title()}else{"Diagnostics"};
+                    let icon_color=if selected {accent}else{theme::TEXT_DIM};
                     // Hardware state reads at a glance: green ready, red fault, grey unknown.
                     let dot=if index>=7 {theme::TEXT_DIM} else {
                         match self.registry.state(GROUPS[index].device()) {
@@ -532,7 +606,7 @@ impl App {
                         }
                     };
                     canvas.fill_rect(Rect::new(x+tile_w as i16-8,y+7,3,3),dot);
-                    Self::home_icon(canvas,x+12,y+19,index,if selected{theme::TEXT}else{theme::TEXT_DIM},bg);
+                    Self::home_icon(canvas,x+12,y+19,index,icon_color,bg);
                     Self::text(canvas,x+34,y+22,tile_w.saturating_sub(42),label,if selected{theme::TEXT}else{theme::TEXT_DIM},bg,1);
                 }
                 if full {Self::page_indicator(canvas,page,8_usize.div_ceil(count),50,self.bottom(canvas));}
@@ -546,7 +620,7 @@ impl App {
                     let index=page*rows+row;if !full&&index!=selection&&index!=self.last_selection{continue;}
                     let y=50+row as i16*44;let selected=index==selection;let bg=if selected{theme::SURFACE_ALT}else{theme::SURFACE};
                     canvas.fill_rect(Rect::new(8,y,canvas.width().saturating_sub(20),38),bg);
-                    if selected {canvas.fill_rect(Rect::new(8,y,2,38),theme::TEXT);}
+                    if selected {canvas.fill_rect(Rect::new(8,y,2,38),Self::group_accent(group));}
                     // A dot carries availability without adding a text row.
                     let dot=match self.registry.state(group.device()) {Some(DeviceState::Ready)=>theme::SUCCESS,Some(_)=>theme::DANGER,None=>theme::TEXT_DIM};
                     canvas.fill_rect(Rect::new(canvas.width().saturating_sub(16) as i16,y+18,3,3),dot);
@@ -666,6 +740,45 @@ impl App {
             canvas.fill_rect(Rect::new(canvas.width().saturating_sub(5) as i16,y,2,thumb),theme::ACCENT);
         }
     }
+    /// Boot splash: logo, title, reveal-in boot checklist and a blinking hint.
+    fn render_splash(&self,canvas:&mut impl Canvas) {
+        canvas.fill_rect(Rect::new(0,0,canvas.width(),canvas.height()),theme::BACKGROUND);
+        let width=canvas.width();
+        let big=width>=200;
+        let logo=u16::min(if big {96}else{56},canvas.height()/3);
+        let lx=((width-logo)/2) as i16;
+        let ly=if big {44}else{20};
+        canvas.draw_bitmap(lx,ly,assets::LOGO_W,assets::LOGO_H,logo,logo,assets::LOGO);
+        let mut top=ly+logo as i16+10;
+        let title=cyberdeck_core::DEVICE_NAME;
+        let scale=if big {2}else{1};
+        let text_width=(title.chars().count() as u16)*6*u16::from(scale);
+        Self::text(canvas,((width-text_width)/2) as i16,top,text_width,title,theme::TEXT,theme::BACKGROUND,scale);
+        top+=4+14*scale as i16;
+        let tagline=alloc::format!("CYBERDECK // V{}",cyberdeck_core::FIRMWARE_VERSION);
+        let tag_width=(tagline.len() as u16)*6;
+        Self::text(canvas,((width-tag_width)/2) as i16,top,tag_width,&tagline,theme::ACCENT,theme::BACKGROUND,1);
+        top+=18;
+        // Reveal progress bar: accent fill over a dim track, percent at the right.
+        let lines=self.boot_lines();
+        let bar_x=8;let bar_w=width.saturating_sub(58);
+        canvas.fill_rect(Rect::new(bar_x,top,bar_w,4),theme::SURFACE_ALT);
+        let total=lines.len().max(1);
+        let shown=self.splash_reveal.min(total);
+        let pct=(shown*100/total) as u16;
+        canvas.fill_rect(Rect::new(bar_x,top,bar_w*pct/100,4),theme::ACCENT);
+        Self::text(canvas,bar_x+(bar_w as i16)+6,top.saturating_sub(2),50,&format!("{pct}%"),theme::TEXT_DIM,theme::BACKGROUND,1);
+        top+=14;
+        for (passed,line) in lines.iter().take(self.splash_reveal).take(if big {7}else{4}) {
+            Self::text(canvas,10,top,width.saturating_sub(20),line,if *passed {theme::TEXT_DIM}else{theme::WARNING},theme::BACKGROUND,1);
+            top+=12;
+        }
+        if (self.splash_elapsed / 350).is_multiple_of(2) {
+            let hint="PRESS ANY KEY";
+            let hint_width=(hint.len() as u16)*6;
+            Self::text(canvas,((width-hint_width)/2) as i16,canvas.height().saturating_sub(24) as i16,width,hint,theme::ACCENT,theme::BACKGROUND,1);
+        }
+    }
     fn render_footer(&self,canvas:&mut impl Canvas) {
         let y=Self::footer_y(canvas);canvas.fill_rect(Rect::new(0,y,canvas.width(),20),theme::SURFACE);
         let hint=match self.screen {
@@ -675,7 +788,17 @@ impl App {
             Screen::Running(_)=>"BACK  STOP",Screen::Results(_)=>"SEL  SETTINGS",
             Screen::Edit(_,_)=>"BACK  SAVE",_=>"BACK  RETURN",
         };
-        Self::text(canvas,10,y+6,canvas.width().saturating_sub(20),hint,theme::TEXT_DIM,theme::SURFACE,1);
+        Self::text(canvas,10,y+6,canvas.width().saturating_sub(60),hint,theme::TEXT_DIM,theme::SURFACE,1);
+        // Battery pill with level fill and a terminal nub; red when low.
+        if let Some(percent)=self.live.battery {
+            let bx=canvas.width().saturating_sub(40) as i16;let by=y+5;
+            let level=if percent<=10 {theme::DANGER}else if percent<=35 {theme::WARNING}else{theme::SUCCESS};
+            canvas.fill_rect(Rect::new(bx,by,20,10),theme::TEXT_DIM);
+            canvas.fill_rect(Rect::new(bx+1,by+1,18,8),theme::SURFACE);
+            canvas.fill_rect(Rect::new(bx+20,by+2,2,6),theme::TEXT_DIM);
+            let fill=(u16::from(percent)*18/100).min(18);
+            if fill>0 {canvas.fill_rect(Rect::new(bx+1,by+1,fill,8),level);}
+        }
         // Results screens already show the outcome as content; the pop-up band
         // would repeat it.
         if let Some(message)=&self.live.message {

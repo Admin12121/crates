@@ -238,9 +238,8 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
-    // Report the previous crash once, then clear the marker. This runs before
-    // any task is spawned, so no other code touches the panic statics.
-    // Safety: only the panic handler writes these statics; reads are by value.
+    // Crash report: read+clear before any task is spawned. Safety: only the
+    // panic handler writes these statics; reads are by value.
     let (mark, line) = unsafe { (PANIC_MARK, PANIC_LINE) };
 
     // Board selection is a build-time switch (`CYBERDECK_BOARD=field`).
@@ -497,6 +496,9 @@ async fn main(spawner: Spawner) -> ! {
     // Built-in demo scripts plus any `*.TXT` payloads on the card.
     refresh_payloads(&mut app);
     sd::request_payload_scan();
+    app.enter_splash(embassy_time::Instant::now().as_millis());
+    let mut tick=0u8;
+    let mut message_seen:(String,u64)=(String::new(),0);
     let mut active_tool:Option<Tool>=None;
     let mut pending_rf:Option<(Tool,u64)>=None;
     let mut last_payload_scan=0u64;
@@ -561,6 +563,14 @@ async fn main(spawner: Spawner) -> ! {
                 file_action=None;
             }else if status.starts_with("0 files")||status.contains("empty")||status.contains("failed")||status.contains("unavailable"){app.set_message(&status);file_action=None;}
         }
+        // Toasted messages self-dismiss: nothing blocks the footer forever.
+        if let Some(message)=app.message() {
+            if message_seen.0.as_str()!=message.as_str() {message_seen=(message,now_ms);}
+            else if now_ms.saturating_sub(message_seen.1)>=4500 {app.clear_message();message_seen=(String::new(),0);}
+        } else if !message_seen.0.is_empty() {
+            message_seen=(String::new(),0);
+        }
+        app.splash_tick(now_ms);
         rf.step(now_ms);
         if payload::sync_from_storage(){refresh_payloads(&mut app);}
         if app.wants_payloads()&&sd::ready()&&now_ms.saturating_sub(last_payload_scan)>=3000
@@ -568,7 +578,7 @@ async fn main(spawner: Spawner) -> ! {
         if let Some((adc,pin,divider,last))=battery_adc.as_mut()&& now_ms.saturating_sub(*last)>=500{battery::publish(adc.read_blocking(pin),*divider);*last=now_ms;}
         if active_tool==Some(Tool::GpsWardrive)&&now_ms.saturating_sub(last_wardrive_scan)>=10_000&&!wifi::busy(){wifi::submit(WifiCommand::Scan);last_wardrive_scan=now_ms;}
         if gps::detected()!=gps_seen {gps_seen=gps::detected();app.set_device_state(DeviceClass::Gps,if gps_seen{DeviceState::Ready}else{DeviceState::NotDetected},Some("UART NMEA receiver"));}
-        if now_ms.saturating_sub(last_render_ms)>=250 {
+        if now_ms.saturating_sub(last_render_ms)>=if app.splash_active(){80}else{250} {
             let(wifi_status,aps,wifi_frames,wifi_dropped)=wifi::snapshot();
             let(ble_status,ble_devices,ble_frames)=ble::snapshot();
             // BLE HID reports through the same progress fields as USB HID.
@@ -605,14 +615,15 @@ async fn main(spawner: Spawner) -> ! {
             if active_tool==Some(Tool::PktFiles){packet_lines=alloc::vec![storage_status];if !file_last_name.is_empty(){packet_lines.push(file_last_name.clone());}packet_lines.extend(sd::preview().lines().take(24).map(String::from));}
             if active_tool==Some(Tool::BleGatt){packet_lines=ble::gatt_snapshot();}
             let mut probe_lines=probe.lines.clone();probe_lines.push(sd::status_line());probe_lines.push(battery::status_line());
-            let preview=usb::preview(app.settings().payload).map(|text|text.lines().take(20).map(String::from).collect()).unwrap_or_default();
+            tick=tick.wrapping_add(1);
+            let preview=if app.wants_payloads(){usb::preview(app.settings().payload).map(|text|text.lines().take(20).map(String::from).collect()).unwrap_or_default()}else{Vec::new()};
             let live=Live{wifi_status:wifi_status.clone(),wifi_busy:wifi::busy(),aps,wifi_frames,wifi_dropped,
                 eapol:passive.eapol,handshakes:passive.handshakes,pmkids:passive.pmkids,
                 portal_clients,portal_requests,
                 probe_ssids:passive.probe_ssids,probe_rows:passive.probes.len() as u32,
                 rf_envelope:rf.envelope(),rf_waterfall:rf.spectrum.waterfall().iter().flatten().copied().collect(),rf_peak:rf.spectrum.peak_channel().unwrap_or(0),rf_packets:rf.packets,rf_dropped:rf.log.dropped(),
                 ble_status:ble_status.clone(),ble_devices,ble_frames,usb_status:usb_status.clone(),usb_percent,usb_keystrokes,usb_unsupported,
-                buttons:buttons.levels(),probe_lines,message:app.message(),usb_paused:app.usb_paused(),
+                buttons:buttons.levels(),probe_lines,message:app.message(),usb_paused:app.usb_paused(),battery:battery::percent(),tick,
                 gps_lines:gps::snapshot(),net_lines,packet_lines,result_lines:Vec::new(),usb_preview:preview,capture_files,export_status:if sd::ready(){None}else{Some(sd::status_line())}};
             app.set_live(live);
             if now_ms.saturating_sub(started_ms)>300 {
