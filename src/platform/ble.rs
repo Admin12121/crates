@@ -34,22 +34,18 @@ pub struct BleDevice {
 
 pub struct BleState {
     pub online: bool,
-    busy: bool,
     pub status: String,
     pub devices: Vec<BleDevice>,
     pub frames: u32,
-    pub dropped: u32,
 }
 
 impl BleState {
     const fn new() -> Self {
         Self {
             online: false,
-            busy: false,
             status: String::new(),
             devices: Vec::new(),
             frames: 0,
-            dropped: 0,
         }
     }
 }
@@ -99,15 +95,10 @@ fn set_status(text: &str) {
     });
 }
 
-pub fn snapshot() -> (String, Vec<BleDevice>, u32, u32) {
+pub fn snapshot() -> (String, Vec<BleDevice>, u32) {
     critical_section::with(|cs| {
         let state = STATE.borrow_ref(cs);
-        (
-            state.status.clone(),
-            state.devices.clone(),
-            state.frames,
-            state.dropped,
-        )
+        (state.status.clone(), state.devices.clone(), state.frames)
     })
 }
 
@@ -136,7 +127,6 @@ fn record(report: &AdvReport) {
         }
         if state.devices.len() >= MAX_DEVICES {
             state.devices.remove(0);
-            state.dropped = state.dropped.saturating_add(1);
         }
         state.devices.push(BleDevice {
             address,
@@ -184,8 +174,6 @@ async fn scan_session(controller: &BleController) {
         let mut state = STATE.borrow_ref_mut(cs);
         state.devices.clear();
         state.frames = 0;
-        state.dropped = 0;
-        state.busy = true;
     });
     let params = LeSetScanParams::new(
         LeScanKind::Passive,
@@ -196,7 +184,6 @@ async fn scan_session(controller: &BleController) {
     );
     if let Err(_) = controller.exec(&params).await {
         set_status("scan parameters rejected");
-        critical_section::with(|cs| STATE.borrow_ref_mut(cs).busy = false);
         return;
     }
     if controller
@@ -205,7 +192,6 @@ async fn scan_session(controller: &BleController) {
         .is_err()
     {
         set_status("scan enable rejected");
-        critical_section::with(|cs| STATE.borrow_ref_mut(cs).busy = false);
         return;
     }
     let mut buffer = [0u8; 260];
@@ -234,7 +220,6 @@ async fn scan_session(controller: &BleController) {
     let _ = controller.exec(&LeSetScanEnable::new(false, false)).await;
     critical_section::with(|cs| {
         let mut state = STATE.borrow_ref_mut(cs);
-        state.busy = false;
         state.status = alloc::format!("scan stopped: {} devices", state.devices.len());
     });
 }
@@ -244,7 +229,6 @@ async fn advertise_session(controller: &BleController, campaign: SpamCampaign) {
     set_status(campaign.label());
     critical_section::with(|cs| {
         let mut state = STATE.borrow_ref_mut(cs);
-        state.busy = true;
         state.frames = 0;
     });
     let params = LeSetAdvParams::new(
@@ -262,7 +246,6 @@ async fn advertise_session(controller: &BleController, campaign: SpamCampaign) {
     );
     if controller.exec(&params).await.is_err() {
         set_status("advertising parameters rejected");
-        critical_section::with(|cs| STATE.borrow_ref_mut(cs).busy = false);
         return;
     }
     let mut rotator = SpamRotator::new(campaign, 0x5EED_1234);
@@ -299,7 +282,6 @@ async fn advertise_session(controller: &BleController, campaign: SpamCampaign) {
     let _ = controller.exec(&LeSetAdvEnable::new(false)).await;
     critical_section::with(|cs| {
         let mut state = STATE.borrow_ref_mut(cs);
-        state.busy = false;
         state.status = alloc::format!("{} frames advertised", state.frames);
     });
 }

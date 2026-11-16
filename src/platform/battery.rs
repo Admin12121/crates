@@ -51,7 +51,7 @@ pub fn publish(raw: u16, divider: u16) {
 }
 
 /// Latest pack reading, or `None` before the first sample.
-pub fn snapshot() -> Option<(u16, u8)> {
+fn snapshot() -> Option<(u16, u8)> {
     critical_section::with(|cs| {
         let state = STATE.borrow_ref(cs);
         (state.samples > 0).then_some((state.millivolts, state.percent))

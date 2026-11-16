@@ -11,11 +11,12 @@ use esp_hal::delay::Delay;
 use esp_hal::gpio::Output;
 use esp_hal::spi::master::Spi;
 
-use cyberdeck_core::board::{DisplayController, DisplayGeometry};
+use cyberdeck_core::board::{DisplayController, DisplayGeometry, DisplayOrientation};
 
 const CMD_SWRESET: u8 = 0x01;
 const CMD_SLPOUT: u8 = 0x11;
 const CMD_NORON: u8 = 0x13;
+const CMD_INVOFF: u8 = 0x20;
 const CMD_INVON: u8 = 0x21;
 const CMD_DISPON: u8 = 0x29;
 const CMD_CASET: u8 = 0x2A;
@@ -56,6 +57,54 @@ pub struct Display<'d> {
     width: u16,
     height: u16,
     controller: DisplayController,
+    orientation: DisplayOrientation,
+    inverted: bool,
+}
+
+/// Streams 16-bit pixels in 128-byte chunks, flushing on fill.
+struct PixelSink<'a, 'd> {
+    spi: &'a mut Spi<'d, Blocking>,
+    chunk: [u8; 128],
+    used: usize,
+}
+
+impl<'a, 'd> PixelSink<'a, 'd> {
+    fn new(spi: &'a mut Spi<'d, Blocking>) -> Self {
+        Self {
+            spi,
+            chunk: [0u8; 128],
+            used: 0,
+        }
+    }
+
+    fn flush(&mut self) -> bool {
+        if self.used == 0 {
+            return true;
+        }
+        let ok = SpiBus::write(self.spi, &mut self.chunk[..self.used]).is_ok();
+        self.used = 0;
+        ok
+    }
+
+    fn push(&mut self, bytes: [u8; 2]) -> bool {
+        self.chunk[self.used] = bytes[0];
+        self.chunk[self.used + 1] = bytes[1];
+        self.used += 2;
+        if self.used == self.chunk.len() {
+            self.flush()
+        } else {
+            true
+        }
+    }
+
+    fn repeat(&mut self, bytes: [u8; 2], count: u32) -> bool {
+        for _ in 0..count {
+            if !self.push(bytes) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 impl<'d> Display<'d> {
@@ -69,6 +118,8 @@ impl<'d> Display<'d> {
         backlight: Option<Output<'d>>,
         geometry: DisplayGeometry,
         controller: DisplayController,
+        orientation: DisplayOrientation,
+        inverted: bool,
     ) -> Result<Self, DisplayError> {
         let mut display = Self {
             spi,
@@ -80,6 +131,8 @@ impl<'d> Display<'d> {
             width: geometry.width,
             height: geometry.height,
             controller,
+            orientation,
+            inverted,
         };
         display.reset();
         display.init_sequence()?;
@@ -101,12 +154,9 @@ impl<'d> Display<'d> {
         self.delay.delay_millis(120);
         // 16 bits/pixel, RGB565.
         self.command(CMD_COLMOD, &[0x55])?;
-        // No mirroring/rotation for the reference panel.
-        self.command(CMD_MADCTL, &[0x00])?;
-        // Inversion is required by the ST7789 panel, not the Wokwi ILI9341 model.
-        if self.controller == DisplayController::St7789 {
-            self.command(CMD_INVON, &[])?;
-        }
+        // Rotation and inversion come from the board profile, not the driver.
+        self.command(CMD_MADCTL, &[self.orientation.madctl()])?;
+        self.command(if self.inverted { CMD_INVON } else { CMD_INVOFF }, &[])?;
         self.command(CMD_NORON, &[])?;
         self.command(CMD_DISPON, &[])?;
         self.delay.delay_millis(20);
@@ -197,22 +247,10 @@ impl Canvas for Display<'_> {
             self.cs.set_high();
             return;
         }
-        let pixel = color.0.to_be_bytes();
-        // 64-pixel chunks keep the stack use at 128 bytes.
-        let mut chunk = [0u8; 128];
-        for i in 0..64 {
-            chunk[i * 2] = pixel[0];
-            chunk[i * 2 + 1] = pixel[1];
-        }
         let total = u32::from(clipped.w) * u32::from(clipped.h);
-        let mut remaining = total;
-        while remaining > 0 {
-            let pixels = remaining.min(64) as usize;
-            if SpiBus::write(&mut self.spi, &mut chunk[..pixels * 2]).is_err() {
-                break;
-            }
-            remaining -= pixels as u32;
-        }
+        let mut sink = PixelSink::new(&mut self.spi);
+        sink.repeat(color.0.to_be_bytes(), total);
+        sink.flush();
         self.cs.set_high();
     }
 
@@ -256,6 +294,50 @@ impl Canvas for Display<'_> {
                 }
             }
         }
+        self.cs.set_high();
+    }
+
+    /// Batched string rendering: one window for the whole run instead of one per
+    /// glyph. Per-glyph windows cost three commands each and make text-dense
+    /// screens extremely slow over SPI.
+    fn draw_text(&mut self, x: i16, y: i16, text: &str, color: Rgb565, bg: Rgb565, scale: u8) {
+        let count = text.chars().count();
+        if count == 0 {
+            return;
+        }
+        let scale = scale.max(1) as u16;
+        let advance = u16::from(font::ADVANCE) * scale;
+        let w = advance * count as u16;
+        let h = u16::from(font::GLYPH_H) * scale;
+        if x < 0 || y < 0 || x as u16 + w > self.width || y as u16 + h > self.height {
+            return;
+        }
+        self.cs.set_low();
+        if self.set_window_held(Rect::new(x, y, w, h)).is_err() {
+            self.cs.set_high();
+            return;
+        }
+        let fg = color.0.to_be_bytes();
+        let bg = bg.0.to_be_bytes();
+        let gap = u16::from(font::ADVANCE - font::GLYPH_W);
+        let mut sink = PixelSink::new(&mut self.spi);
+        for py in 0..u16::from(font::GLYPH_H) {
+            for _ in 0..scale {
+                for ch in text.chars() {
+                    let glyph = font::glyph(ch);
+                    for px in 0..u16::from(font::GLYPH_W) {
+                        let bytes = if glyph[px as usize] & (1 << py) != 0 {
+                            fg
+                        } else {
+                            bg
+                        };
+                        sink.repeat(bytes, u32::from(scale));
+                    }
+                    sink.repeat(bg, u32::from(gap) * u32::from(scale));
+                }
+            }
+        }
+        sink.flush();
         self.cs.set_high();
     }
 

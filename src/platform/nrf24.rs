@@ -35,7 +35,6 @@ pub struct Nrf24<'d> {
     csn: Output<'d>,
     ce: Output<'d>,
     channel: u8,
-    rate: DataRate,
 }
 
 impl<'d> Nrf24<'d> {
@@ -50,7 +49,6 @@ impl<'d> Nrf24<'d> {
             csn,
             ce,
             channel: 76,
-            rate,
         };
         radio.csn.set_high();
         radio.ce.set_low();
@@ -83,10 +81,6 @@ impl<'d> Nrf24<'d> {
 
     pub const fn channel(&self) -> u8 {
         self.channel
-    }
-
-    pub const fn data_rate(&self) -> DataRate {
-        self.rate
     }
 
     fn command(&mut self, command: u8) -> Result<(), Nrf24Error> {
@@ -199,7 +193,6 @@ impl<'d> Nrf24<'d> {
     }
 }
 
-/// Build the active-low chip-select/CE outputs the driver expects.
 pub fn outputs<'d>(
     csn: impl esp_hal::gpio::OutputPin + 'd,
     ce: impl esp_hal::gpio::OutputPin + 'd,

@@ -73,6 +73,17 @@ impl<'d> Buttons<'d> {
         )
     }
 
+    /// Raw pressed state for diagnostics: up, down, select, back, home.
+    pub fn levels(&self) -> [bool; 5] {
+        [
+            self.up.is_low(),
+            self.down.is_low(),
+            self.select.is_low(),
+            self.back.is_low(),
+            self.home.is_low(),
+        ]
+    }
+
     /// Sample all buttons and return at most one event per tick.
     pub fn poll(&mut self, now_ms: u64) -> Option<Button> {
         let levels = [

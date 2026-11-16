@@ -157,7 +157,6 @@ const REPORT_DESCRIPTOR: &[u8] = &[
 
 pub struct UsbStatus {
     pub installed: bool,
-    pub running: bool,
     pub status: String,
     pub percent: u8,
     pub keystrokes: u32,
@@ -168,7 +167,6 @@ impl UsbStatus {
     const fn new() -> Self {
         Self {
             installed: false,
-            running: false,
             status: String::new(),
             percent: 0,
             keystrokes: 0,
@@ -222,7 +220,7 @@ fn take_command() -> Option<UsbCommand> {
     critical_section::with(|cs| COMMAND.borrow_ref_mut(cs).take())
 }
 
-fn publish(status: &str, percent: u8, keystrokes: u32, unsupported: u32, running: bool) {
+fn publish(status: &str, percent: u8, keystrokes: u32, unsupported: u32) {
     critical_section::with(|cs| {
         let mut state = STATE.borrow_ref_mut(cs);
         state.status.clear();
@@ -230,11 +228,10 @@ fn publish(status: &str, percent: u8, keystrokes: u32, unsupported: u32, running
         state.percent = percent;
         state.keystrokes = keystrokes;
         state.unsupported = unsupported;
-        state.running = running;
     });
 }
 
-pub fn snapshot() -> (String, u8, u32, u32, bool) {
+pub fn snapshot() -> (String, u8, u32, u32) {
     critical_section::with(|cs| {
         let state = STATE.borrow_ref(cs);
         (
@@ -242,7 +239,6 @@ pub fn snapshot() -> (String, u8, u32, u32, bool) {
             state.percent,
             state.keystrokes,
             state.unsupported,
-            state.running,
         )
     })
 }
@@ -312,7 +308,7 @@ pub async fn run(usb: esp_hal::usb::otg::Usb<'static>) -> ! {
 
     let mut device = builder.build();
     mark_installed();
-    publish("idle", 0, 0, 0, false);
+    publish("idle", 0, 0, 0);
 
     let mut engine: Option<HidEngine> = None;
     let mut script_name = String::new();
@@ -325,11 +321,11 @@ pub async fn run(usb: esp_hal::usb::otg::Usb<'static>) -> ! {
                     Ok(script) => {
                         script_name.clear();
                         script_name.push_str("demo.txt");
-                        publish("running demo.txt", 0, 0, 0, true);
+                        publish("running demo.txt", 0, 0, 0);
                         engine = Some(HidEngine::new(&script, Layout::Us));
                         finished_reported = false;
                     }
-                    Err(error) => publish(&error.describe(), 0, 0, 0, false),
+                    Err(error) => publish(&error.describe(), 0, 0, 0),
                 },
                 UsbCommand::Stop => {
                     if let Some(engine) = engine.as_mut() {
@@ -365,7 +361,7 @@ pub async fn run(usb: esp_hal::usb::otg::Usb<'static>) -> ! {
             }
             let engine = active;
             if write_failed {
-                publish("USB write failed", 0, 0, 0, false);
+                publish("USB write failed", 0, 0, 0);
             } else if engine.is_finished() && !finished_reported {
                 finished_reported = true;
                 let progress = engine.progress();
@@ -374,7 +370,6 @@ pub async fn run(usb: esp_hal::usb::otg::Usb<'static>) -> ! {
                     progress.percent,
                     engine.keystrokes(),
                     engine.unsupported_chars(),
-                    false,
                 );
             } else if !engine.is_finished() {
                 let progress = engine.progress();
@@ -388,7 +383,6 @@ pub async fn run(usb: esp_hal::usb::otg::Usb<'static>) -> ! {
                     progress.percent,
                     engine.keystrokes(),
                     engine.unsupported_chars(),
-                    true,
                 );
             }
         }

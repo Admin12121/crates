@@ -30,7 +30,6 @@ const PCAP_CHUNK_BYTES: usize = 8192;
 /// Largest frame retained from the promiscuous callback.
 pub const SNAP_LEN: usize = 512;
 const RX_SLOTS: usize = 8;
-/// Access points kept in the scan table.
 pub const MAX_APS: usize = 24;
 
 /// One captured frame, copied out of the radio callback.
@@ -169,7 +168,6 @@ pub struct ApRow {
     pub security: &'static str,
 }
 
-/// Radio state shared with the UI.
 pub struct WifiState {
     pub busy: bool,
     pub status: String,
@@ -178,7 +176,6 @@ pub struct WifiState {
     pub bytes: u64,
     pub dropped: u32,
     pub channel: u8,
-    pub last_frame: Option<CapturedFrame>,
 }
 
 impl WifiState {
@@ -191,7 +188,6 @@ impl WifiState {
             bytes: 0,
             dropped: 0,
             channel: 1,
-            last_frame: None,
         }
     }
 }
@@ -199,7 +195,6 @@ impl WifiState {
 static WIFI_STATE: Mutex<RefCell<WifiState>> = Mutex::new(RefCell::new(WifiState::new()));
 static WIFI_COMMAND: Mutex<RefCell<Option<WifiCommand>>> = Mutex::new(RefCell::new(None));
 
-/// Work requested by the UI.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WifiCommand {
     Scan,
@@ -241,8 +236,8 @@ fn set_busy(busy: bool) {
     critical_section::with(|cs| WIFI_STATE.borrow_ref_mut(cs).busy = busy);
 }
 
-/// Snapshot of the shared state for rendering.
-pub fn snapshot() -> (String, Vec<ApRow>, u32, u32, u8, Option<CapturedFrame>) {
+/// Snapshot for rendering.
+pub fn snapshot() -> (String, Vec<ApRow>, u32, u32) {
     critical_section::with(|cs| {
         let state = WIFI_STATE.borrow_ref(cs);
         (
@@ -250,8 +245,6 @@ pub fn snapshot() -> (String, Vec<ApRow>, u32, u32, u8, Option<CapturedFrame>) {
             state.aps.clone(),
             state.frames,
             state.dropped,
-            state.channel,
-            state.last_frame,
         )
     })
 }
@@ -333,7 +326,6 @@ fn reset_counters(channel: u8) {
         state.bytes = 0;
         state.dropped = 0;
         state.channel = channel;
-        state.last_frame = None;
         state.busy = true;
     });
     critical_section::with(|cs| {
@@ -393,7 +385,6 @@ async fn capture_session(controller: &mut WifiController<'static>, channel: u8) 
                 let mut state = WIFI_STATE.borrow_ref_mut(cs);
                 state.frames = state.frames.saturating_add(1);
                 state.bytes = state.bytes.saturating_add(u64::from(frame.len));
-                state.last_frame = Some(frame);
             });
         }
         critical_section::with(|cs| {
@@ -444,7 +435,6 @@ async fn attack_session(controller: &mut WifiController<'static>, mode: AttackMo
             critical_section::with(|cs| {
                 let mut state = WIFI_STATE.borrow_ref_mut(cs);
                 state.frames = runner.frames();
-                state.last_frame = None;
             });
         }
         if runner.should_stop(embassy_time::Instant::now().as_millis()) || stop_requested() {

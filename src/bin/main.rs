@@ -189,6 +189,8 @@ async fn main(spawner: Spawner) -> ! {
                 Some(Output::new(peripherals.GPIO13, Level::Low, output)),
                 profile.display_geometry,
                 display_controller,
+                profile.display_orientation,
+                profile.display_inverted,
             )
             .map_err(|error| error.message())
         }
@@ -507,11 +509,11 @@ async fn main(spawner: Spawner) -> ! {
                     // Persist whatever the running tool collected before the radios stop.
                     match active_tool {
                         Some(Tool::WifiScan) => {
-                            let (_, aps, _, _, _, _) = wifi::snapshot();
+                            let (_, aps, _, _) = wifi::snapshot();
                             let _ = export::save_wifi_findings(&aps);
                         }
                         Some(Tool::BleScan | Tool::BleSpam) => {
-                            let (_, devices, frames, _) = ble::snapshot();
+                            let (_, devices, frames) = ble::snapshot();
                             let _ = export::save_ble_history(&devices, frames);
                         }
                         Some(Tool::RfCapture) => {
@@ -548,10 +550,10 @@ async fn main(spawner: Spawner) -> ! {
             }
         }
 
-        let (status, aps, frames, dropped, _channel, _frame) = wifi::snapshot();
-        let (ble_status, ble_devices, ble_frames, _ble_dropped) = ble::snapshot();
-        let (usb_status, usb_percent, usb_keystrokes, usb_unsupported, _usb_running) =
-            usb::snapshot();
+        let (status, aps, frames, dropped) = wifi::snapshot();
+        let (ble_status, ble_devices, ble_frames) = ble::snapshot();
+        let (usb_status, usb_percent, usb_keystrokes, usb_unsupported) = usb::snapshot();
+        let button_levels = buttons.levels();
         let mut live = Live {
             wifi_status: status,
             wifi_busy: false,
@@ -569,6 +571,7 @@ async fn main(spawner: Spawner) -> ! {
             usb_percent,
             usb_keystrokes,
             usb_unsupported,
+            buttons: button_levels,
             probe_lines: {
                 let mut lines = probe.lines.clone();
                 lines.push(sd::status_line());

@@ -166,19 +166,17 @@ impl MenuList {
         self.clamp_scroll();
     }
 
-    /// Move the selection by `delta`, skipping entries that cannot be selected.
+    /// Move the selection by `delta`.
+    ///
+    /// Every row is reachable: availability is signalled by the badge and enforced
+    /// when the entry is launched, so a screen full of missing hardware does not
+    /// look like a frozen UI.
     pub fn move_by(&mut self, delta: isize) {
         if self.items.is_empty() {
             return;
         }
         let len = self.items.len() as isize;
-        let mut index = self.selected as isize;
-        for _ in 0..len {
-            index = (index + delta).rem_euclid(len);
-            if self.items[index as usize].status.is_selectable() {
-                break;
-            }
-        }
+        let index = (self.selected as isize + delta).rem_euclid(len);
         self.selected = index as usize;
         self.clamp_scroll();
     }
@@ -251,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn unselectable_rows_are_skipped() {
+    fn every_row_is_reachable() {
         let items = alloc::vec![
             MenuItem::ready("Ready"),
             MenuItem::requiring("RF Monitor", "nRF24L01 radio"),
@@ -260,11 +258,11 @@ mod tests {
         ];
         let mut menu = MenuList::new("M", items, 4);
         menu.next();
-        assert_eq!(menu.selected_item().unwrap().label, "Settings");
+        assert_eq!(menu.selected_item().unwrap().label, "RF Monitor");
+        assert!(!menu.selected_item().unwrap().status.is_selectable());
         menu.next();
-        assert_eq!(menu.selected_item().unwrap().label, "Ready");
-        // Direct selection still works for detail screens.
-        menu.select(1);
+        assert_eq!(menu.selected_item().unwrap().label, "GPS");
+        menu.previous();
         assert_eq!(menu.selected(), 1);
     }
 

@@ -84,6 +84,36 @@ pub enum CoexPolicy {
     ExclusiveNrf24,
 }
 
+/// Panel mounting orientation; the driver derives MADCTL from this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayOrientation {
+    Rotate0,
+    Rotate90,
+    Rotate180,
+    Rotate270,
+}
+
+impl DisplayOrientation {
+    /// MADCTL bits: MV = 0x20, MX = 0x40, MY = 0x80.
+    pub const fn madctl(self) -> u8 {
+        match self {
+            Self::Rotate0 => 0x00,
+            Self::Rotate90 => 0x60,
+            Self::Rotate180 => 0xC0,
+            Self::Rotate270 => 0xA0,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Rotate0 => "0°",
+            Self::Rotate90 => "90°",
+            Self::Rotate180 => "180°",
+            Self::Rotate270 => "270°",
+        }
+    }
+}
+
 /// One board/profile.
 #[derive(Debug, Clone, Copy)]
 pub struct BoardProfile {
@@ -92,6 +122,11 @@ pub struct BoardProfile {
     pub mcu: &'static str,
     pub display_controller: DisplayController,
     pub display_geometry: DisplayGeometry,
+    /// How the panel is physically mounted.
+    pub display_orientation: DisplayOrientation,
+    /// Enable when the panel needs colour inversion (most ST7789 modules do;
+    /// the ILI9341 used by the simulator must stay off).
+    pub display_inverted: bool,
     pub display: DisplayPins,
     pub input: InputPins,
     pub sd: SpiPins,
@@ -139,11 +174,13 @@ pub const CORE_PROFILE: BoardProfile = BoardProfile {
     id: BoardId::CoreS3DevKit,
     name: "CyberDeck CORE (ESP32-S3 DevKitC-1)",
     mcu: "ESP32-S3 WROOM-1 (octal PSRAM)",
-    display_controller: DisplayController::St7789,
+    display_controller: DisplayController::Ili9341,
     display_geometry: DisplayGeometry {
         width: 240,
         height: 320,
     },
+    display_orientation: DisplayOrientation::Rotate180,
+    display_inverted: false,
     display: DisplayPins {
         sck: 12,
         mosi: 11,
@@ -284,6 +321,15 @@ impl BoardProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orientation_madctl_bits() {
+        use DisplayOrientation::*;
+        assert_eq!(Rotate0.madctl(), 0x00);
+        assert_eq!(Rotate90.madctl(), 0x60);
+        assert_eq!(Rotate180.madctl(), 0xC0);
+        assert_eq!(Rotate270.madctl(), 0xA0);
+    }
 
     #[test]
     fn core_profile_supports_deck_groups_but_no_nrf24() {

@@ -128,8 +128,28 @@ pub struct Live {
     pub usb_percent: u8,
     pub usb_keystrokes: u32,
     pub usb_unsupported: u32,
+    /// Raw pressed state, up/down/select/back/home.
+    pub buttons: [bool; 5],
     pub probe_lines: Vec<String>,
     pub message: Option<String>,
+}
+
+impl Live {
+    fn same_visual(&self, other: &Live) -> bool {
+        self.wifi_status == other.wifi_status
+            && self.ble_status == other.ble_status
+            && self.usb_status == other.usb_status
+            && self.message == other.message
+            && self.aps.len() == other.aps.len()
+            && self.ble_devices.len() == other.ble_devices.len()
+            && self.wifi_frames == other.wifi_frames
+            && self.wifi_dropped == other.wifi_dropped
+            && self.rf_packets == other.rf_packets
+            && self.rf_peak == other.rf_peak
+            && self.usb_percent == other.usb_percent
+            && self.usb_keystrokes == other.usb_keystrokes
+            && self.buttons == other.buttons
+    }
 }
 
 enum Screen {
@@ -243,9 +263,21 @@ impl App {
             .collect()
     }
 
+    /// Merge a new snapshot, repainting only when the current screen's content
+    /// actually changed. Repainting every tick cleared and redrew the whole panel
+    /// four times a second, which looked like the UI restarting.
     pub fn set_live(&mut self, live: Live) {
+        let changed = match self.screen {
+            Screen::Home | Screen::Group(_) => false,
+            Screen::Diagnostics => {
+                self.live.probe_lines != live.probe_lines || self.live.buttons != live.buttons
+            }
+            Screen::Running(_) => !self.live.same_visual(&live),
+        };
+        if changed {
+            self.needs_render = true;
+        }
         self.live = live;
-        self.needs_render = true;
     }
 
     pub fn message(&self) -> Option<String> {
@@ -345,6 +377,8 @@ impl App {
                                 return Action::Start(tool);
                             }
                         }
+                        self.needs_render = true;
+                        self.live.message = Some(String::from("Requires hardware"));
                         return Action::None;
                     }
                     Button::Back => {
@@ -525,6 +559,22 @@ impl App {
         if self.live.probe_lines.is_empty() {
             canvas.draw_text(4, y, "no probe data", theme::WARNING, theme::BACKGROUND, 1);
         }
+        // Live button levels: press a key and the matching marker fills in.
+        let base = canvas.height() as i16 - 44;
+        canvas.draw_text(
+            4,
+            base,
+            "UP  DOWN  SEL  BACK  HOME",
+            theme::TEXT_DIM,
+            theme::BACKGROUND,
+            1,
+        );
+        let mut marks = String::new();
+        for pressed in self.live.buttons {
+            marks.push(if pressed { '#' } else { '.' });
+            marks.push_str("    ");
+        }
+        canvas.draw_text(4, base + 12, &marks, theme::ACCENT, theme::BACKGROUND, 2);
     }
 
     fn render_footer(&self, canvas: &mut impl Canvas) {
