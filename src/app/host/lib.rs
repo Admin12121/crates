@@ -117,9 +117,9 @@ mod tests {
         assert_eq!(app.handle(Button::Back),Action::Stop);
         app.set_live(Live::default());
         let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);
-        assert!(canvas.text.contains("RESULTS"));assert!(canvas.text.contains("42 frames"),"stopping preserves the result even when driver counters reset");
+        assert!(canvas.text.contains("RESULTS"));assert!(canvas.text.contains("42 FR"),"stopping preserves the result even when driver counters reset");
         app.handle(Button::Home);app.handle(Button::Select);app.handle(Button::Select);app.handle(Button::Up);app.handle(Button::Select);
-        let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);assert!(canvas.text.contains("42 frames"));
+        let mut canvas=TestCanvas::new(240,320);app.render(&mut canvas);assert!(canvas.text.contains("42 FR"));
     }
     #[test]
     fn all_seven_modules_are_reachable_without_developer_badges() {

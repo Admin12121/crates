@@ -177,15 +177,19 @@ async fn recover<D:embedded_sdmmc::BlockDevice>(m:&Manager<D>,v:embedded_sdmmc::
     result?;closed_source?;closed?;dir?;
     Ok(alloc::format!("Recovered {output}: {records} records, {bytes} B; original kept"))
 }
-/// Payload scripts are plain text in the card root; captures use their own extensions.
+/// Root folder that groups every on-card payload type, so a future RF or Wi-Fi
+/// payload set cannot collide with the HID scripts.
+const PAYLOAD_ROOT:&str="PAYLOADS";
+const HID_PAYLOAD_DIR:&str="HID";
+
+/// Payload scripts are plain text inside `PAYLOADS/HID`; captures never mix in.
 fn is_payload_file(name:&str)->bool{
     name.get(name.len().saturating_sub(4)..).is_some_and(|extension|extension.eq_ignore_ascii_case(".TXT"))
 }
 /// Read one script, bounded by [`MAX_EXTERNAL_PAYLOAD_BYTES`]; invalid UTF-8 becomes
 /// replacement characters so the engine reports them as unsupported instead of failing.
-fn read_payload<D:embedded_sdmmc::BlockDevice>(m:&Manager<D>,v:embedded_sdmmc::RawVolume,name:&str)->Result<String,&'static str>{
-    let root=m.open_root_dir(v).map_err(|_|"directory open failed")?;
-    let file=match m.open_file_in_dir(root,name,Mode::ReadOnly){Ok(f)=>f,Err(_)=>{let _=m.close_dir(root);return Err("payload open failed")}};
+fn read_payload<D:embedded_sdmmc::BlockDevice>(m:&Manager<D>,directory:embedded_sdmmc::RawDirectory,name:&str)->Result<String,&'static str>{
+    let file=match m.open_file_in_dir(directory,name,Mode::ReadOnly){Ok(f)=>f,Err(_)=>return Err("payload open failed")};
     let mut bytes=Vec::new();let mut buffer=[0u8;256];
     let mut result=Ok(());
     loop{
@@ -197,27 +201,37 @@ fn read_payload<D:embedded_sdmmc::BlockDevice>(m:&Manager<D>,v:embedded_sdmmc::R
         }
     }
     let closed=m.close_file(file).map_err(|_|"payload close failed");
-    let directory=m.close_dir(root).map_err(|_|"directory close failed");
-    result?;closed?;directory?;
+    result?;closed?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 fn scan_payloads<D:embedded_sdmmc::BlockDevice>(m:&Manager<D>,v:embedded_sdmmc::RawVolume)->Result<Vec<(String,String)>,&'static str>{
     let root=m.open_root_dir(v).map_err(|_|"directory open failed")?;
+    let payloads=match m.open_dir(root,PAYLOAD_ROOT){
+        Ok(d)=>d,
+        Err(_)=>{let _=m.close_dir(root);return Err("create PAYLOADS/HID on the card")}
+    };
+    let hid=match m.open_dir(payloads,HID_PAYLOAD_DIR){
+        Ok(d)=>{let _=m.close_dir(payloads);d}
+        Err(_)=>{let _=m.close_dir(payloads);let _=m.close_dir(root);return Err("create PAYLOADS/HID on the card")}
+    };
     let mut names:Vec<String>=Vec::new();
-    let scanned=m.iterate_dir(root,|entry|{
+    let scanned=m.iterate_dir(hid,|entry|{
         if entry.attributes.is_directory(){return}
         let name=alloc::format!("{}",entry.name);
         if !is_payload_file(&name){return}
         // Bounded: a card cannot make the firmware allocate an unbounded list.
         if names.len()<MAX_EXTERNAL_PAYLOADS{names.push(name);}
     }).map_err(|_|"directory read failed");
-    let closed=m.close_dir(root).map_err(|_|"directory close failed");
-    scanned.and(closed)?;
     names.sort();
     let mut scripts=Vec::new();
-    for name in names{
-        if let Ok(text)=read_payload(m,v,&name){if !text.is_empty(){scripts.push((name,text));}}
+    if scanned.is_ok(){
+        for name in names{
+            if let Ok(text)=read_payload(m,hid,&name){if !text.is_empty(){scripts.push((name,text));}}
+        }
     }
+    let closed_hid=m.close_dir(hid).map_err(|_|"directory close failed");
+    let closed_root=m.close_dir(root).map_err(|_|"directory close failed");
+    scanned?;closed_hid?;closed_root?;
     Ok(scripts)
 }
 pub async fn run(bus:SdBus<'static>)->!{

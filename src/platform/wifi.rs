@@ -388,6 +388,18 @@ pub fn passive_snapshot()->PassiveSnapshot{critical_section::with(|cs|{
         frames:o.frames.clone(),eapol:o.scan.eapol,handshakes:o.handshakes.complete_count()as u32,pmkids:o.handshakes.pmkid_count()as u32,histogram:o.histogram.report()}
 })}
 pub fn passive_hashes()->String{critical_section::with(|cs|OBSERVER.borrow_ref(cs).export_hashes())}
+/// Dissection of the newest captured frame, for the Frame inspector screen.
+pub fn dissect_latest()->Vec<String>{
+    let mut buffer=[0u8;cyberdeck_core::packet::dissect::MAX_FRAME];
+    let length=critical_section::with(|cs|{
+        let observer=OBSERVER.borrow_ref(cs);
+        let bytes=observer.latest.bytes();
+        let length=bytes.len().min(buffer.len());
+        buffer[..length].copy_from_slice(&bytes[..length]);
+        length
+    });
+    cyberdeck_core::packet::dissect::lines(&buffer[..length])
+}
 
 async fn cancelled_or_timeout(_id:u32,seconds:u64){let deadline=embassy_time::Instant::now()+embassy_time::Duration::from_secs(seconds);loop{if stop_requested()||embassy_time::Instant::now()>=deadline{return}embassy_time::Timer::after(embassy_time::Duration::from_millis(20)).await;}}
 async fn disconnect(controller:&mut WifiController<'static>)->bool{

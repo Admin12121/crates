@@ -1,8 +1,8 @@
 //! Payload catalogue shared by the USB and BLE HID actors.
 //!
-//! Built-in demo scripts live in `cyberdeck_core`; user scripts are read from the SD
-//! card by the storage actor and moved here exactly once, so a script body exists in
-//! RAM once rather than once per reader.
+//! Built-in demo scripts live in `cyberdeck_core`; user scripts come from
+//! `PAYLOADS/HID/*.TXT` on the SD card and are moved here exactly once, so a script
+//! body exists in RAM once rather than once per reader.
 
 use alloc::string::String;
 use alloc::vec::Vec;

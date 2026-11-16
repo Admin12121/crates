@@ -24,6 +24,8 @@ const CMD_RASET: u8 = 0x2B;
 const CMD_RAMWR: u8 = 0x2C;
 const CMD_MADCTL: u8 = 0x36;
 const CMD_COLMOD: u8 = 0x3A;
+/// MADCTL bit 3 selects blue/green/red order instead of red/green/blue.
+const MADCTL_BGR: u8 = 0x08;
 
 /// Display initialisation failure with an actionable message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +61,7 @@ pub struct Display<'d> {
     controller: DisplayController,
     orientation: DisplayOrientation,
     inverted: bool,
+    bgr: bool,
 }
 
 /// Streams 16-bit pixels in 128-byte chunks, flushing on fill.
@@ -120,6 +123,7 @@ impl<'d> Display<'d> {
         controller: DisplayController,
         orientation: DisplayOrientation,
         inverted: bool,
+        bgr: bool,
     ) -> Result<Self, DisplayError> {
         let mut display = Self {
             spi,
@@ -133,6 +137,7 @@ impl<'d> Display<'d> {
             controller,
             orientation,
             inverted,
+            bgr,
         };
         display.reset();
         display.init_sequence()?;
@@ -154,8 +159,10 @@ impl<'d> Display<'d> {
         self.delay.delay_millis(120);
         // 16 bits/pixel, RGB565.
         self.command(CMD_COLMOD, &[0x55])?;
-        // Rotation and inversion come from the board profile, not the driver.
-        self.command(CMD_MADCTL, &[self.orientation.madctl()])?;
+        // Rotation, inversion and colour order come from the board profile, not the
+        // driver: an ILI9341 with the BGR bit clear swaps red and blue on screen.
+        let madctl = self.orientation.madctl() | if self.bgr { MADCTL_BGR } else { 0 };
+        self.command(CMD_MADCTL, &[madctl])?;
         self.command(if self.inverted { CMD_INVON } else { CMD_INVOFF }, &[])?;
         self.command(CMD_NORON, &[])?;
         self.command(CMD_DISPON, &[])?;

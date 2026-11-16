@@ -51,7 +51,9 @@ pub mod theme {
     pub const SUCCESS: Rgb565 = Rgb565::rgb(0x3F, 0xD6, 0x7A);
     pub const WARNING: Rgb565 = Rgb565::rgb(0xF5, 0xB3, 0x3C);
     pub const DANGER: Rgb565 = Rgb565::rgb(0xF2, 0x5F, 0x5F);
-    pub const SELECTION: Rgb565 = Rgb565::rgb(0x1F, 0x3A, 0x54);
+    /// Selected surface. Deliberately near-neutral so it reads the same on panels
+    /// with either colour-filter order (RGB and BGR modules both ship here).
+    pub const SELECTION: Rgb565 = Rgb565::rgb(0x2B, 0x32, 0x3B);
 
     /// Font scale for the header.
     pub const HEADER_SCALE: u8 = 2;

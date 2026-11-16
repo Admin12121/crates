@@ -74,11 +74,19 @@ fn render(app:&mut App,width:u16,height:u16,path:&Path)->io::Result<()> {let mut
 fn main()->io::Result<()> {
     let output=std::env::args_os().nth(1).ok_or_else(||io::Error::new(io::ErrorKind::InvalidInput,"usage: ui-preview OUTPUT_DIRECTORY"))?;
     let output=Path::new(&output);fs::create_dir_all(output)?;
-    render(&mut App::new(registry()),240,320,&output.join("home-240x320.png"))?;
-    render(&mut App::new(registry()),128,160,&output.join("home-128x160.png"))?;
+    // Home tiles carry live counters, so seed them like the running device does.
+    let mut home=App::new(registry());home.set_live(live());render(&mut home,240,320,&output.join("home-240x320.png"))?;
+    let mut small=App::new(registry());small.set_live(live());render(&mut small,128,160,&output.join("home-128x160.png"))?;
+    // Module list for the first group (one Select on Home opens it).
+    let mut group=App::new(registry());group.handle(Button::Select);group.set_live(live());
+    render(&mut group,240,320,&output.join("wifi-tools-240x320.png"))?;
     let mut setup=open(0,1,false);setup.set_live(live());render(&mut setup,240,320,&output.join("wifi-setup-240x320.png"))?;
     render(&mut setup,128,160,&output.join("wifi-setup-128x160.png"))?;
     let mut wifi=open(0,0,true);wifi.set_live(live());render(&mut wifi,240,320,&output.join("wifi-live-240x320.png"))?;
+    let mut handshake=open(0,2,true);
+    let mut handshake_live=live();handshake_live.eapol=6;handshake_live.handshakes=1;handshake_live.pmkids=2;
+    handshake.set_live(handshake_live);
+    render(&mut handshake,240,320,&output.join("wifi-handshake-240x320.png"))?;
     wifi.handle(Button::Back);render(&mut wifi,240,320,&output.join("wifi-results-240x320.png"))?;
     let mut ble=open(2,0,true);ble.set_live(live());render(&mut ble,240,320,&output.join("ble-live-240x320.png"))?;
     let mut usb=open(3,1,false);usb.set_live(live());render(&mut usb,240,320,&output.join("usb-setup-240x320.png"))?;

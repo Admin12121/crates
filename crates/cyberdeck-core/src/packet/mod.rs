@@ -6,6 +6,7 @@
 
 pub mod storage;
 pub mod passive;
+pub mod dissect;
 
 use alloc::string::String;
 use alloc::vec::Vec;

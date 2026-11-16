@@ -127,6 +127,9 @@ pub struct BoardProfile {
     /// Enable when the panel needs colour inversion (most ST7789 modules do;
     /// the ILI9341 used by the simulator must stay off).
     pub display_inverted: bool,
+    /// Enable when the panel wants blue/green/red order (MADCTL BGR bit).
+    /// With this off, an ILI9341 renders the palette with red and blue exchanged.
+    pub display_bgr: bool,
     pub display: DisplayPins,
     pub input: InputPins,
     pub sd: SpiPins,
@@ -186,6 +189,8 @@ pub const CORE_PROFILE: BoardProfile = BoardProfile {
     },
     display_orientation: DisplayOrientation::Rotate180,
     display_inverted: false,
+    // ILI9341 modules take blue/green/red order; flipping this off swaps red and blue.
+    display_bgr: true,
     display: DisplayPins {
         sck: 12,
         mosi: 11,

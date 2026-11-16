@@ -30,6 +30,15 @@ pub fn save_wifi_findings(aps: &[super::wifi::ApRow]) -> bool {
     sd::enqueue(&name, text.into_bytes(), false)
 }
 
+/// G01: EAPOL/PMKID findings in hashcat 22000 format, ready for offline analysis.
+pub fn save_wifi_hashes(hashes: &str) -> bool {
+    if hashes.is_empty() {
+        return false;
+    }
+    let name = sd::next_name("HASH", "22000");
+    sd::enqueue(&name, hashes.as_bytes().to_vec(), false)
+}
+
 /// G03: observed BLE devices, radio class and RSSI.
 pub fn save_ble_history(devices: &[BleDevice], frames: u32) -> bool {
     if devices.is_empty() {

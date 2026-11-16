@@ -7,6 +7,18 @@ use crate::time::Timestamp;
 use crate::wifi::{ap::ScanEngine,eapol::HandshakeStore,frame::{self,FrameHeader,WpsInfo}};
 #[derive(Clone,Debug)]
 pub struct InspectorRow {pub summary:String,pub metadata:String,pub hex:String}
+/// Newest frame kept verbatim so the inspector can dissect it on demand.
+#[derive(Clone)]
+pub struct LatestFrame {data:[u8;crate::packet::dissect::MAX_FRAME],len:u16}
+impl LatestFrame {
+    pub const fn new()->Self {Self {data:[0;crate::packet::dissect::MAX_FRAME],len:0}}
+    pub fn set(&mut self,frame:&[u8]) {
+        let length=frame.len().min(self.data.len());
+        self.data[..length].copy_from_slice(&frame[..length]);
+        self.len=length as u16;
+    }
+    pub fn bytes(&self)->&[u8] {&self.data[..usize::from(self.len)]}
+}
 #[derive(Clone,Debug)]
 pub struct WpsObservation {pub bssid:MacAddr,pub info:WpsInfo,pub channel:u8,pub rssi:i8}
 pub struct PassiveEngine<const A:usize,const S:usize,const H:usize,const R:usize> {
@@ -15,13 +27,15 @@ pub struct PassiveEngine<const A:usize,const S:usize,const H:usize,const R:usize
     pub frames:Vec<InspectorRow>,
     pub wps:Vec<WpsObservation>,
     pub histogram:ProtocolHistogram,
+    pub latest:LatestFrame,
 }
 impl<const A:usize,const S:usize,const H:usize,const R:usize> Default for PassiveEngine<A,S,H,R> {
     fn default()->Self {Self::new()}
 }
 impl<const A:usize,const S:usize,const H:usize,const R:usize> PassiveEngine<A,S,H,R> {
-    pub const fn new()->Self {Self {scan:ScanEngine::new(),handshakes:HandshakeStore::new(),frames:Vec::new(),wps:Vec::new(),histogram:ProtocolHistogram {beacons:0,probe_requests:0,probe_responses:0,authentication:0,association:0,deauthentication:0,disassociation:0,action:0,eapol:0,data:0,control:0,other:0,malformed:0}}}
+    pub const fn new()->Self {Self {scan:ScanEngine::new(),handshakes:HandshakeStore::new(),frames:Vec::new(),wps:Vec::new(),latest:LatestFrame::new(),histogram:ProtocolHistogram {beacons:0,probe_requests:0,probe_responses:0,authentication:0,association:0,deauthentication:0,disassociation:0,action:0,eapol:0,data:0,control:0,other:0,malformed:0}}}
     pub fn on_frame(&mut self,data:&[u8],rssi:i8,channel:u8,ts_us:u64,filter:&CaptureFilter,original_len:u32) {
+        self.latest.set(data);
         self.scan.on_frame(data,rssi,channel,ts_us/1000);
         if let Some(header)=FrameHeader::parse(data) {
             if header.fc.is_management() && matches!(header.fc.subtype,frame::subtype::BEACON | frame::subtype::PROBE_RESP) {

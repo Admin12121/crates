@@ -14,9 +14,6 @@ impl Group {
     pub const fn title(self) -> &'static str {
         match self { Self::Wifi=>"Wi-Fi",Self::Packet=>"Packet",Self::Ble=>"Bluetooth",Self::UsbHid=>"USB / HID",Self::Rf=>"Radio",Self::Gps=>"GPS",Self::Network=>"Network" }
     }
-    const fn summary(self)->&'static str {
-        match self {Self::Wifi=>"Networks and passive observations",Self::Packet=>"Capture, inspect and export",Self::Ble=>"Nearby devices and advertising",Self::UsbHid=>"Payloads, keyboard and controls",Self::Rf=>"2.4 GHz channel observations",Self::Gps=>"Position, tracks and wardriving",Self::Network=>"Connection and local diagnostics"}
-    }
     const fn device(self)->DeviceClass {
         match self {Self::Wifi|Self::Packet|Self::Network=>DeviceClass::WifiRadio,Self::Ble=>DeviceClass::BleRadio,Self::UsbHid=>DeviceClass::UsbDevice,Self::Rf=>DeviceClass::Nrf24,Self::Gps=>DeviceClass::Gps}
     }
@@ -63,26 +60,6 @@ impl Tool {
             Self::NetInfo|Self::NetDiscover|Self::NetProbe|Self::NetServices=>Group::Network,
         }
     }
-    const fn description(self)->&'static str {
-        match self {
-            Self::WifiScan=>"Signal, channel and security",Self::WifiCapture=>"Listen and save received frames",
-            Self::WifiHandshake=>"Passive EAPOL / PMKID findings",Self::WifiWps=>"Read advertised WPS attributes",Self::WifiClients=>"Observed stations and access points",
-            Self::WifiBeacon=>"Existing laboratory beacon test",Self::WifiDeauth=>"Existing laboratory deauth test",
-            Self::PktCapture=>"Bounded capture with drop counts",Self::PktAnalyse=>"Frame summary, metadata and bytes",
-            Self::PktFiles=>"Browse saved captures and recovery",Self::PktStream=>"Send capture records over USB",
-            Self::BleScan=>"Names, addresses and signal",Self::BleSpam=>"Local advertising experiments",
-            Self::BleGatt=>"Inspect a selected device",Self::BleHid=>"Bluetooth keyboard connection",
-            Self::HidIntro=>"Check the local USB connection",Self::HidDucky=>"Choose and preview a local script",
-            Self::RfSpectrum=>"Energy envelope across channels",Self::RfCapture=>"Receive on a selected channel",
-            Self::GpsStatus=>"Fix quality and coordinates",Self::GpsRecord=>"Save a bounded GPS track",Self::GpsWardrive=>"Combine Wi-Fi observations and GPS",
-            Self::NetInfo=>"Join a network and show address",Self::NetDiscover=>"Find hosts on the local subnet",
-            Self::NetProbe=>"Reachability of a selected host",Self::NetServices=>"Ordinary TCP service diagnostics",
-        }
-    }
-    /// Existing hardware routes. New routes require explicit integration enablement.
-    pub const fn is_wired(self)->bool {
-        matches!(self,Self::WifiScan|Self::WifiCapture|Self::WifiBeacon|Self::WifiDeauth|Self::PktCapture|Self::PktAnalyse|Self::BleScan|Self::BleSpam|Self::HidIntro|Self::HidDucky|Self::RfSpectrum|Self::RfCapture)
-    }
     const fn is_usb(self)->bool {matches!(self,Self::HidIntro|Self::HidDucky)}
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +88,8 @@ pub enum Action { None, Start(Tool), Stop, Pause(bool), FilePreview(u8), FileRec
 #[derive(Default, Clone)]
 pub struct Live {
     pub wifi_status:String,pub wifi_busy:bool,pub aps:Vec<ApRow>,pub wifi_frames:u32,pub wifi_dropped:u32,
+    /// Passive EAPOL/PMKID findings, shown as the handshake screen's headline.
+    pub eapol:u32,pub handshakes:u32,pub pmkids:u32,
     pub rf_envelope:Vec<u8>,pub rf_peak:u8,pub rf_packets:u32,pub rf_dropped:u32,
     pub ble_status:String,pub ble_devices:Vec<BleDevice>,pub ble_frames:u32,
     pub usb_status:String,pub usb_percent:u8,pub usb_keystrokes:u32,pub usb_unsupported:u32,pub usb_paused:bool,
@@ -123,7 +102,9 @@ impl Live {
         self.wifi_status==other.wifi_status && self.wifi_busy==other.wifi_busy &&
         self.aps.len()==other.aps.len() && self.aps.iter().zip(&other.aps).all(|(a,b)| a.ssid==b.ssid&&a.bssid==b.bssid&&a.channel==b.channel&&a.rssi==b.rssi&&a.security==b.security) &&
         self.ble_devices.len()==other.ble_devices.len() && self.ble_devices.iter().zip(&other.ble_devices).all(|(a,b)|a.address==b.address&&a.name==b.name&&a.rssi==b.rssi&&a.kind==b.kind&&a.detail==b.detail) &&
-        self.wifi_frames==other.wifi_frames&&self.wifi_dropped==other.wifi_dropped&&self.ble_status==other.ble_status&&self.ble_frames==other.ble_frames&&
+        self.wifi_frames==other.wifi_frames&&self.wifi_dropped==other.wifi_dropped&&
+        self.eapol==other.eapol&&self.handshakes==other.handshakes&&self.pmkids==other.pmkids&&
+        self.ble_status==other.ble_status&&self.ble_frames==other.ble_frames&&
         self.rf_envelope==other.rf_envelope&&self.rf_peak==other.rf_peak&&self.rf_packets==other.rf_packets&&self.rf_dropped==other.rf_dropped&&
         self.usb_status==other.usb_status&&self.usb_percent==other.usb_percent&&self.usb_keystrokes==other.usb_keystrokes&&self.usb_unsupported==other.usb_unsupported&&self.usb_paused==other.usb_paused&&
         self.gps_lines==other.gps_lines&&self.net_lines==other.net_lines&&self.packet_lines==other.packet_lines&&self.result_lines==other.result_lines&&self.usb_preview==other.usb_preview&&self.capture_files==other.capture_files&&self.export_status==other.export_status&&self.message==other.message
@@ -169,14 +150,6 @@ impl App {
     pub fn set_registry(&mut self,registry:PeripheralRegistry) {self.registry=registry;self.needs_render=true;}
     fn unavailable(&self,tool:Tool)->Option<String> {
         if let Some((_,Some(reason)))=self.availability.iter().find(|entry|entry.0==tool) {return Some(reason.clone());}
-        if !tool.is_wired() && !self.availability.iter().any(|entry|entry.0==tool&&entry.1.is_none()) {
-            return Some(String::from(match tool {
-                Tool::BleGatt=>"GATT connections are not enabled in this firmware.",
-                Tool::BleHid=>"Bluetooth keyboard mode is not enabled in this firmware.",
-                Tool::PktStream=>"USB capture streaming is not enabled in this firmware.",
-                _=>"This tool is not enabled in this firmware.",
-            }));
-        }
         let device=tool.group().device();
         if !self.registry.is_ready(device) {
             return Some(match self.registry.state(device) {
@@ -320,12 +293,11 @@ impl App {
         match tool.group() {
             Group::Wifi|Group::Packet=>{
                 if !live.wifi_status.is_empty(){lines.push(live.wifi_status.clone());}
-                lines.push(format!("{} frames   {} dropped",live.wifi_frames,live.wifi_dropped));
                 if matches!(tool,Tool::WifiScan|Tool::WifiBeacon|Tool::WifiDeauth) {
-                    for (index,ap) in live.aps.iter().take(32).enumerate() {
-                        lines.push(format!("{}  {}",index+1,if ap.ssid.is_empty(){"Hidden network"}else{&ap.ssid}));
-                        lines.push(format!("Ch {}  {} dBm  {}",ap.channel,ap.rssi,ap.security));
-                        lines.push(format!("{}",ap.bssid));
+                    // One line per network: name first, then the two numbers that matter.
+                    for ap in live.aps.iter().take(32) {
+                        let name=if ap.ssid.is_empty(){"HIDDEN"}else{ap.ssid.as_str()};
+                        lines.push(format!("{name}  CH{}  {}DBM",ap.channel,ap.rssi));
                     }
                     if live.aps.is_empty(){lines.push(String::from("No networks observed yet."));}
                 }
@@ -333,19 +305,18 @@ impl App {
                 lines.extend(live.packet_lines.iter().take(128).cloned());
             },
             Group::Ble=>{
-                lines.push(live.ble_status.clone());lines.push(format!("{} reports   {} devices",live.ble_frames,live.ble_devices.len()));
-                for (index,device) in live.ble_devices.iter().take(32).enumerate() {
-                    lines.push(format!("{}  {}",index+1,if device.name.is_empty(){"Unnamed device"}else{&device.name}));
-                    lines.push(format!("{} dBm  {}",device.rssi,device.kind));lines.push(device.address.clone());
-                    if !device.detail.is_empty(){lines.push(device.detail.clone());}
+                lines.push(live.ble_status.clone());
+                for device in live.ble_devices.iter().take(32) {
+                    let name=if device.name.is_empty(){"UNNAMED"}else{device.name.as_str()};
+                    lines.push(format!("{name}  {}DBM  {}",device.rssi,device.kind));
                 }
             },
             Group::UsbHid=>{
-                lines.push(live.usb_status.clone());lines.push(format!("{}% complete",live.usb_percent));lines.push(format!("{} keystrokes",live.usb_keystrokes));
-                if live.usb_paused{lines.push(String::from("Paused. Select to resume."));}
-                if live.usb_unsupported>0 {lines.push(format!("{} unsupported characters",live.usb_unsupported));}
+                lines.push(live.usb_status.clone());
+                if live.usb_paused{lines.push(String::from("PAUSED"));}
+                if live.usb_unsupported>0 {lines.push(format!("{} UNSUPPORTED",live.usb_unsupported));}
             },
-            Group::Rf=>{lines.push(format!("Peak channel {}",live.rf_peak));lines.push(format!("{} packets",live.rf_packets));lines.push(format!("{} dropped",live.rf_dropped));},
+            Group::Rf=>lines.push(format!("{} DROPPED",live.rf_dropped)),
             Group::Gps=>lines.extend(live.gps_lines.iter().take(128).cloned()),
             Group::Network=>lines.extend(live.net_lines.iter().take(128).cloned()),
         }
@@ -357,7 +328,7 @@ impl App {
     }
     fn field_label(&self,field:Field,tool:Tool)->(String,String) {
         match field {
-            Field::Run=>(String::from(if tool==Tool::NetInfo {"Connect / refresh"}else{"Run"}),String::from("Select to start")),
+            Field::Run=>(String::from(if tool==Tool::NetInfo {"Connect / refresh"}else{"Run"}),String::from("Start")),
             Field::Channel=>(String::from("Channel"),if self.settings.channel==0&&tool.group()!=Group::Rf {String::from("Hop")}else{format!("{}",self.settings.channel)}),
             Field::Filter=>(String::from("Frame filter"),String::from(match self.settings.filter {PacketFilter::All=>"All frames",PacketFilter::Management=>"Management",PacketFilter::Data=>"Data",PacketFilter::Eapol=>"EAPOL"})),
             Field::Layout=>(String::from("Keyboard layout"),String::from(match self.settings.layout {KeyboardLayout::Us=>"US",KeyboardLayout::Uk=>"UK",KeyboardLayout::De=>"German"})),
@@ -389,14 +360,75 @@ impl App {
         let columns=usize::from(width/(u16::from(font::ADVANCE)*u16::from(scale)));
         if columns>0 {canvas.draw_text(x,y,&ellipsize(text,columns),fg,bg,scale);}
     }
+    /// Right-aligned, ellipsized text for label/value form rows.
+    fn text_right(canvas:&mut impl Canvas,right:i16,y:i16,max_width:u16,text:&str,fg:Rgb565,bg:Rgb565,scale:u8) {
+        let columns=usize::from(max_width/(u16::from(font::ADVANCE)*u16::from(scale)));
+        if columns==0 {return;}
+        let fitted=ellipsize(text,columns);
+        let width=(fitted.chars().count() as u16)*u16::from(font::ADVANCE)*u16::from(scale);
+        Self::text(canvas,(right-width as i16).max(0),y,width,&fitted,fg,bg,scale);
+    }
+    /// The one number that screen exists to show, plus a caption and a side note.
+    fn headline(tool:Tool,live:&Live)->Option<(String,String,String)> {
+        match tool {
+            Tool::WifiScan|Tool::WifiBeacon|Tool::WifiDeauth=>
+                Some((format!("{}",live.aps.len()),String::from("NETWORKS"),format!("{} FR",live.wifi_frames))),
+            Tool::WifiHandshake=>Some((format!("{}",live.handshakes),String::from("HANDSHAKES"),format!("{} PMKID",live.pmkids))),
+            Tool::WifiCapture|Tool::WifiWps|Tool::WifiClients|Tool::PktCapture|Tool::PktAnalyse=>
+                Some((format!("{}",live.wifi_frames),String::from("FRAMES"),format!("{} DROP",live.wifi_dropped))),
+            Tool::BleScan=>Some((format!("{}",live.ble_devices.len()),String::from("DEVICES"),format!("{} RPT",live.ble_frames))),
+            Tool::BleSpam=>Some((format!("{}",live.ble_frames),String::from("REPORTS"),String::new())),
+            Tool::HidIntro|Tool::HidDucky=>Some((format!("{}%",live.usb_percent),String::from("COMPLETE"),format!("{} KEYS",live.usb_keystrokes))),
+            Tool::RfSpectrum=>Some((format!("{}",live.rf_peak),String::from("CHANNEL"),String::from("PEAK"))),
+            Tool::RfCapture=>Some((format!("{}",live.rf_packets),String::from("PACKETS"),format!("{} DROP",live.rf_dropped))),
+            _=>None,
+        }
+    }
     fn footer_y(canvas:&impl Canvas)->i16 {canvas.height().saturating_sub(20) as i16}
     fn bottom(&self,canvas:&impl Canvas)->i16 {Self::footer_y(canvas)-if self.live.message.is_some() {32}else{4}}
     fn header(&self,canvas:&mut impl Canvas,title:&str,subtitle:&str) {
-        let width=canvas.width();canvas.fill_rect(Rect::new(0,0,width,44.min(canvas.height())),theme::SURFACE);
+        let width=canvas.width();
+        canvas.fill_rect(Rect::new(0,0,width,44.min(canvas.height())),theme::SURFACE);
         let scale=if title.chars().count()*12<=usize::from(width.saturating_sub(16)){2}else{1};
-        Self::text(canvas,8,8,width.saturating_sub(16),title,theme::TEXT,theme::SURFACE,scale);
-        Self::text(canvas,8,31,width.saturating_sub(16),subtitle,theme::TEXT_DIM,theme::SURFACE,1);
+        // A screen without a subtitle centres its title instead of leaving a gap.
+        let y=if subtitle.is_empty(){15}else{10};
+        Self::text(canvas,8,y,width.saturating_sub(16),title,theme::TEXT,theme::SURFACE,scale);
+        if !subtitle.is_empty(){Self::text(canvas,8,31,width.saturating_sub(16),subtitle,theme::TEXT_DIM,theme::SURFACE,1);}
         canvas.draw_hline(0,43,width,theme::SURFACE_ALT);
+    }
+    /// Thin scroll indicator for paged lists: shape instead of words.
+    fn page_indicator(canvas:&mut impl Canvas,page:usize,pages:usize,top:i16,bottom:i16) {
+        if pages<=1||bottom<=top+10 {return;}
+        let x=canvas.width().saturating_sub(4) as i16;
+        let height=(bottom-top) as u16;
+        canvas.fill_rect(Rect::new(x,top,2,height),theme::SURFACE_ALT);
+        let thumb=(height/pages as u16).max(10).min(height);
+        let span=u32::from(height-thumb);
+        let y=top+(span*page as u32/(pages as u32-1).max(1)) as i16;
+        canvas.fill_rect(Rect::new(x,y,2,thumb),theme::TEXT_DIM);
+    }
+    /// Pictogram per module, drawn from filled rectangles: no image assets needed.
+    fn home_icon(canvas:&mut impl Canvas,x:i16,y:i16,index:usize,fg:Rgb565,bg:Rgb565) {
+        canvas.fill_rect(Rect::new(x,y,14,14),bg);
+        let mut bar=|dx:i16,dy:i16,w:u16,h:u16| canvas.fill_rect(Rect::new(x+dx,y+dy,w,h),fg);
+        match index {
+            // Wi-Fi: descending signal bars with a dot.
+            0=>{bar(0,1,14,2);bar(2,5,10,2);bar(4,9,6,2);bar(6,12,2,1);}
+            // Packet: stacked capture layers.
+            1=>{bar(0,2,14,2);bar(1,6,12,2);bar(2,10,10,2);}
+            // Bluetooth: rune.
+            2=>{bar(6,0,2,14);bar(8,2,2,2);bar(10,4,2,2);bar(8,6,2,2);bar(8,8,2,2);bar(10,10,2,2);bar(3,5,2,3);bar(5,7,2,2);}
+            // USB: trident.
+            3=>{bar(6,2,2,10);bar(5,12,4,2);bar(4,0,6,2);bar(1,6,5,2);bar(1,4,2,2);bar(8,8,5,2);bar(11,6,2,2);}
+            // RF: mast with two wave pairs.
+            4=>{bar(6,6,2,8);bar(3,3,2,7);bar(9,3,2,7);bar(0,1,2,11);bar(12,1,2,11);}
+            // GPS: crosshair.
+            5=>{bar(0,6,14,2);bar(6,0,2,14);bar(4,4,2,2);bar(8,4,2,2);bar(4,8,2,2);bar(8,8,2,2);}
+            // Network: three linked nodes.
+            6=>{bar(1,1,4,4);bar(9,1,4,4);bar(5,9,4,4);bar(5,4,1,3);bar(2,5,10,1);bar(6,7,1,2);}
+            // Diagnostics: pulse trace.
+            _=>{bar(0,6,3,2);bar(3,3,2,7);bar(5,8,2,2);bar(7,4,2,5);bar(9,6,5,2);}
+        }
     }
     /// Selection moves repaint only old/new cards unless the page changed.
     pub fn render(&mut self,canvas:&mut impl Canvas) {
@@ -404,14 +436,14 @@ impl App {
         let changed=self.last_rendered!=Some(self.screen)||self.last_notice!=self.live.message.is_some();
         if changed {canvas.fill_rect(Rect::new(0,0,canvas.width(),canvas.height()),theme::BACKGROUND);}
         let (title,subtitle)=match self.screen {
-            Screen::Home=>(cyberdeck_core::DEVICE_NAME,if self.home_index<7{GROUPS[self.home_index].summary()}else{"Hardware, buttons and system status"}),
-            Screen::Group(group)=>(group.title(),group.summary()),
-            Screen::Setup(tool)=>(tool.title(),"SETUP  /  choose an option"),
-            Screen::Running(tool)=>(tool.title(),if self.live.usb_paused{"PAUSED  /  select to resume"}else{"LIVE  /  scroll for details"}),
-            Screen::Results(tool)=>(tool.title(),"RESULTS  /  select to run again"),
-            Screen::Unavailable(tool)=>(tool.title(),"Unavailable"),
-            Screen::Edit(_,password)=>(if password{"Enter password"}else{"Enter SSID"},"UP/DOWN character  SELECT add"),
-            Screen::Diagnostics=>("Diagnostics","Hardware and input status"),
+            Screen::Home=>(cyberdeck_core::DEVICE_NAME,""),
+            Screen::Group(group)=>(group.title(),""),
+            Screen::Setup(tool)=>(tool.title(),"SETUP"),
+            Screen::Running(tool)=>(tool.title(),if self.live.usb_paused{"PAUSED"}else{"LIVE"}),
+            Screen::Results(tool)=>(tool.title(),"RESULTS"),
+            Screen::Unavailable(tool)=>(tool.title(),"UNAVAILABLE"),
+            Screen::Edit(_,password)=>(if password{"PASSWORD"}else{"SSID"},""),
+            Screen::Diagnostics=>("Diagnostics",""),
         };
         self.header(canvas,title,subtitle);
         let mut selection=0;let mut page=0;
@@ -423,19 +455,30 @@ impl App {
                 let count=rows*columns;page=self.home_index/count;
                 let full=changed||page!=self.last_page||self.live.message.is_some();
                 if full {canvas.fill_rect(Rect::new(0,45,canvas.width(),canvas.height().saturating_sub(65)),theme::BACKGROUND);}
-                let tile_w=canvas.width().saturating_sub(20)/columns as u16;
+                let gap=8u16;
+                let tile_w=canvas.width().saturating_sub(16).saturating_sub(gap*(columns as u16-1))/columns as u16;
                 for slot in 0..count {
                     let index=page*count+slot;if index>=8{break;}
                     if !full&&index!=self.home_index&&index!=self.last_selection{continue;}
-                    let x=8+(slot%columns) as i16*tile_w as i16;let y=50+(slot/columns) as i16*58;
-                    let selected=index==self.home_index;let bg=if selected{theme::SELECTION}else{theme::SURFACE};
-                    let rect=Rect::new(x,y,tile_w.saturating_sub(6),52);canvas.fill_rect(rect,bg);
-                    if selected {canvas.fill_rect(Rect::new(x,y,3,52),theme::ACCENT);}
-                    let code=["WI","PC","BT","US","RF","GP","IP","DG"][index];
+                    let x=8+(slot%columns) as i16*(tile_w as i16+gap as i16);let y=50+(slot/columns) as i16*58;
+                    let selected=index==self.home_index;
+                    let bg=if selected{theme::SURFACE_ALT}else{theme::SURFACE};
+                    canvas.fill_rect(Rect::new(x,y,tile_w,52),bg);
+                    if selected {canvas.fill_rect(Rect::new(x,y,2,52),theme::TEXT);}
                     let label=if index<7 {GROUPS[index].title()}else{"Diagnostics"};
-                    Self::text(canvas,x+10,y+8,rect.w.saturating_sub(16),code,if selected{theme::ACCENT}else{theme::TEXT_DIM},bg,2);
-                    Self::text(canvas,x+10,y+35,rect.w.saturating_sub(16),label,theme::TEXT,bg,1);
+                    // Hardware state reads at a glance: green ready, red fault, grey unknown.
+                    let dot=if index>=7 {theme::TEXT_DIM} else {
+                        match self.registry.state(GROUPS[index].device()) {
+                            Some(DeviceState::Ready)=>theme::SUCCESS,
+                            Some(_)=>theme::DANGER,
+                            None=>theme::TEXT_DIM,
+                        }
+                    };
+                    canvas.fill_rect(Rect::new(x+tile_w as i16-8,y+7,3,3),dot);
+                    Self::home_icon(canvas,x+12,y+19,index,if selected{theme::TEXT}else{theme::TEXT_DIM},bg);
+                    Self::text(canvas,x+34,y+22,tile_w.saturating_sub(42),label,if selected{theme::TEXT}else{theme::TEXT_DIM},bg,1);
                 }
+                if full {Self::page_indicator(canvas,page,(8+count-1)/count,50,self.bottom(canvas));}
             },
             Screen::Group(group)=>{
                 selection=self.tool_index;
@@ -444,45 +487,59 @@ impl App {
                 if full {canvas.fill_rect(Rect::new(0,45,canvas.width(),canvas.height().saturating_sub(65)),theme::BACKGROUND);}
                 for (row,tool) in group.tools().iter().skip(page*rows).take(rows).enumerate() {
                     let index=page*rows+row;if !full&&index!=selection&&index!=self.last_selection{continue;}
-                    let y=50+row as i16*44;let selected=index==selection;let bg=if selected{theme::SELECTION}else{theme::SURFACE};
+                    let y=50+row as i16*44;let selected=index==selection;let bg=if selected{theme::SURFACE_ALT}else{theme::SURFACE};
                     canvas.fill_rect(Rect::new(8,y,canvas.width().saturating_sub(20),38),bg);
-                    if selected {canvas.fill_rect(Rect::new(8,y,3,38),theme::ACCENT);}
-                    Self::text(canvas,18,y+7,canvas.width().saturating_sub(36),tool.title(),theme::TEXT,bg,1);
-                    Self::text(canvas,18,y+22,canvas.width().saturating_sub(36),tool.description(),theme::TEXT_DIM,bg,1);
+                    if selected {canvas.fill_rect(Rect::new(8,y,2,38),theme::TEXT);}
+                    // A dot carries availability without adding a text row.
+                    let dot=match self.registry.state(group.device()) {Some(DeviceState::Ready)=>theme::SUCCESS,Some(_)=>theme::DANGER,None=>theme::TEXT_DIM};
+                    canvas.fill_rect(Rect::new(canvas.width().saturating_sub(16) as i16,y+18,3,3),dot);
+                    Self::text(canvas,18,y+16,canvas.width().saturating_sub(40),tool.title(),if selected{theme::TEXT}else{theme::TEXT_DIM},bg,1);
                 }
+                if full {Self::page_indicator(canvas,page,(group.tools().len()+rows-1)/rows,50,self.bottom(canvas));}
             },
             Screen::Setup(tool)=>{
                 canvas.fill_rect(Rect::new(0,45,canvas.width(),canvas.height().saturating_sub(65)),theme::BACKGROUND);
                 let fields=self.fields(tool);selection=self.setup_index;
-                let rows=((self.bottom(canvas)-50).max(36) as usize/36).max(1);page=selection/rows;
+                let rows=((self.bottom(canvas)-50).max(30) as usize/30).max(1);page=selection/rows;
                 for (row,field) in fields.iter().skip(page*rows).take(rows).enumerate() {
-                    let index=page*rows+row;let y=50+row as i16*36;let bg=if index==selection{theme::SELECTION}else{theme::SURFACE};
-                    canvas.fill_rect(Rect::new(8,y,canvas.width().saturating_sub(20),32),bg);
-                    if index==selection {canvas.fill_rect(Rect::new(8,y,3,32),theme::ACCENT);}
+                    let index=page*rows+row;let y=50+row as i16*30;
+                    let selected=index==selection;
+                    let bg=if selected{theme::SURFACE_ALT}else{theme::SURFACE};
+                    canvas.fill_rect(Rect::new(8,y,canvas.width().saturating_sub(20),26),bg);
+                    if selected {canvas.fill_rect(Rect::new(8,y,2,26),theme::TEXT);}
                     let (label,value)=self.field_label(*field,tool);
-                    Self::text(canvas,18,y+5,canvas.width().saturating_sub(36),&label,if *field==Field::Run{theme::ACCENT}else{theme::TEXT},bg,1);
-                    Self::text(canvas,18,y+19,canvas.width().saturating_sub(36),&value,theme::TEXT_DIM,bg,1);
+                    let run=*field==Field::Run;
+                    Self::text(canvas,18,y+10,canvas.width()/2,&label,if run{theme::ACCENT}else if selected{theme::TEXT}else{theme::TEXT_DIM},bg,1);
+                    Self::text_right(canvas,canvas.width().saturating_sub(16) as i16,y+10,canvas.width()/2,&value,if run{theme::ACCENT}else{theme::TEXT},bg,1);
                 }
                 if tool.is_usb() {
-                    let y=50+fields.len().min(rows) as i16*36;
-                    if y+18<self.bottom(canvas) {Self::text(canvas,10,y+4,canvas.width().saturating_sub(20),"Payload preview",theme::TEXT_DIM,theme::BACKGROUND,1);self.render_lines(canvas,&self.live.usb_preview,y+20,0);}
+                    let y=50+fields.len().min(rows) as i16*30;
+                    if y+18<self.bottom(canvas) {Self::text(canvas,10,y+2,canvas.width().saturating_sub(20),"SCRIPT",theme::TEXT_DIM,theme::BACKGROUND,1);self.render_lines(canvas,&self.live.usb_preview,y+16,0);}
                 }
             },
             Screen::Running(tool)|Screen::Results(tool)=>{
                 canvas.fill_rect(Rect::new(0,45,canvas.width(),canvas.height().saturating_sub(65)),theme::BACKGROUND);
                 let live=if matches!(self.screen,Screen::Results(_)){self.results.as_ref().map(|result|&result.1).unwrap_or(&self.live)}else{&self.live};
-                let mut top=54;
-                if tool.is_usb() {draw_bar(canvas,Rect::new(10,52,canvas.width().saturating_sub(24),6),u16::from(live.usb_percent)*10,theme::ACCENT);top=70;}
-                if tool==Tool::RfSpectrum&&!live.rf_envelope.is_empty()&&self.bottom(canvas)>140 {
+                let mut top=56;
+                if let Some((big,caption,secondary))=Self::headline(tool,live) {
+                    Self::text(canvas,10,top,canvas.width().saturating_sub(20),&big,theme::TEXT,theme::BACKGROUND,3);
+                    Self::text(canvas,12,top+26,canvas.width().saturating_sub(20),&caption,theme::TEXT_DIM,theme::BACKGROUND,1);
+                    if !secondary.is_empty() {Self::text_right(canvas,canvas.width().saturating_sub(12) as i16,top+8,canvas.width()/2,&secondary,theme::TEXT_DIM,theme::BACKGROUND,1);}
+                    top+=44;
+                }
+                if tool.is_usb() {draw_bar(canvas,Rect::new(10,top,canvas.width().saturating_sub(24),5),u16::from(live.usb_percent)*10,theme::ACCENT);top+=14;}
+                if tool==Tool::RfSpectrum&&!live.rf_envelope.is_empty()&&self.bottom(canvas)>top+46 {
                     let width=canvas.width().saturating_sub(24);let count=live.rf_envelope.len().min(usize::from(width)).max(1);
+                    let baseline=top+44;
                     for index in 0..count {
                         let x=10+((index as u32*u32::from(width))/count as u32) as i16;
                         let next=10+(((index+1) as u32*u32::from(width))/count as u32) as i16;
                         let sample=index*live.rf_envelope.len()/count;
-                        let h=1+u16::from(live.rf_envelope[sample])*48/255;
-                        canvas.fill_rect(Rect::new(x,106-h as i16,(next-x).max(1) as u16,h),theme::ACCENT);
+                        let h=1+u16::from(live.rf_envelope[sample])*40/255;
+                        canvas.fill_rect(Rect::new(x,baseline-h as i16,(next-x).max(1) as u16,h),theme::ACCENT);
                     }
-                    canvas.draw_hline(10,108,width,theme::SURFACE_ALT);top=120;
+                    canvas.draw_hline(10,baseline+1,width,theme::SURFACE_ALT);
+                    top=baseline+10;
                 }
                 self.render_lines(canvas,&self.lines(tool,live),top,self.scroll);
             },
@@ -532,13 +589,13 @@ impl App {
     fn render_footer(&self,canvas:&mut impl Canvas) {
         let y=Self::footer_y(canvas);canvas.fill_rect(Rect::new(0,y,canvas.width(),20),theme::SURFACE);
         let hint=match self.screen {
-            Screen::Home=>"UP/DOWN  SEL open",Screen::Group(_)=>"SEL setup  BACK home",
-            Screen::Setup(_)=>"SEL choose  BACK tools",Screen::Running(tool) if tool.is_usb()=>"SEL pause  BACK stop",
-            Screen::Running(Tool::PktFiles)=>"SEL preview  BACK stop",
-            Screen::Running(_)=>"SEL/BACK stop",Screen::Results(_)=>"SEL setup  BACK tools",
-            Screen::Edit(_,_)=>"BACK save  HOME cancel",_=>"BACK returns",
+            Screen::Home=>"SEL  OPEN",Screen::Group(_)=>"SEL  RUN",
+            Screen::Setup(_)=>"SEL  CHANGE",Screen::Running(tool) if tool.is_usb()=>"SEL  PAUSE",
+            Screen::Running(Tool::PktFiles)=>"SEL  PREVIEW",
+            Screen::Running(_)=>"BACK  STOP",Screen::Results(_)=>"SEL  SETUP",
+            Screen::Edit(_,_)=>"BACK  SAVE",_=>"BACK  RETURN",
         };
-        Self::text(canvas,8,y+6,canvas.width().saturating_sub(16),hint,theme::TEXT_DIM,theme::SURFACE,1);
+        Self::text(canvas,10,y+6,canvas.width().saturating_sub(20),hint,theme::TEXT_DIM,theme::SURFACE,1);
         if let Some(message)=&self.live.message {
             let top=y-32;canvas.fill_rect(Rect::new(0,top,canvas.width(),32),theme::SURFACE_ALT);
             let columns=usize::from(canvas.width().saturating_sub(16)/6).max(1);

@@ -164,6 +164,17 @@ impl<'d> RfRuntime<'d> {
     }
 }
 
+/// Persist whatever the finishing tool produced, on Stop and on auto-finish, so a
+/// scan that ends by itself still leaves its findings on the card.
+fn export_findings(tool:Option<Tool>,rf:&RfRuntime<'_>){
+    if tool==Some(Tool::WifiScan){let(_,aps,_,_)=wifi::snapshot();let _=export::save_wifi_findings(&aps);}
+    if matches!(tool,Some(Tool::WifiScan|Tool::WifiCapture|Tool::WifiHandshake|Tool::WifiWps|Tool::WifiClients)){
+        let _=export::save_wifi_hashes(&wifi::passive_hashes());
+    }
+    if matches!(tool,Some(Tool::BleScan|Tool::BleSpam|Tool::BleGatt)){let(_,devices,frames)=ble::snapshot();let _=export::save_ble_history(&devices,frames);}
+    if tool==Some(Tool::RfCapture){let _=export::save_rf_capture(&rf.log);}
+}
+
 /// Rebuild the payload picker from the built-in list plus any scripts on the card.
 fn refresh_payloads(app:&mut App){
     let names=payload::names();
@@ -218,6 +229,7 @@ async fn main(spawner: Spawner) -> ! {
                     profile.display_orientation
                 },
                 profile.display_inverted,
+                profile.display_bgr,
             )
             .map_err(|error| error.message())
         }
@@ -461,9 +473,7 @@ async fn main(spawner: Spawner) -> ! {
                     }
                 },
                 Action::Stop=>{
-                    if active_tool==Some(Tool::WifiScan){let(_,aps,_,_)=wifi::snapshot();let _=export::save_wifi_findings(&aps);}
-                    if matches!(active_tool,Some(Tool::BleScan|Tool::BleSpam|Tool::BleGatt)){let(_,devices,frames)=ble::snapshot();let _=export::save_ble_history(&devices,frames);}
-                    if active_tool==Some(Tool::RfCapture){let _=export::save_rf_capture(&rf.log);}
+                    export_findings(active_tool,&rf);
                     control::stop(&mut rf);active_tool=None;pending_rf=None;
                 },
                 Action::Pause(paused)=>{
@@ -527,9 +537,10 @@ async fn main(spawner: Spawner) -> ! {
                     packet_lines.extend(passive.wps.iter().map(|row|row.line()));
                     if passive.wps.is_empty(){packet_lines.push(String::from("No WPS information elements observed yet."));}
                 },
-                Some(Tool::WifiHandshake)=>{packet_lines.push(alloc::format!("EAPOL {}  handshakes {}",passive.eapol,passive.handshakes));packet_lines.push(alloc::format!("PMKIDs {}",passive.pmkids));},
+                Some(Tool::WifiHandshake)=>{},
                 _=>{for frame in passive.frames.iter().take(4){packet_lines.push(frame.summary.clone());packet_lines.push(frame.metadata.clone());packet_lines.push(frame.hex.clone());}},
             }
+            if active_tool==Some(Tool::PktAnalyse){packet_lines=wifi::dissect_latest();}
             let(storage_status,files)=sd::library_snapshot();
             let capture_files=files.iter().enumerate().map(|(i,file)|alloc::format!("{} {} {} B",i+1,file.name,file.bytes)).collect();
             if active_tool==Some(Tool::PktFiles){packet_lines=alloc::vec![storage_status];if !file_last_name.is_empty(){packet_lines.push(file_last_name.clone());}packet_lines.extend(sd::preview().lines().take(24).map(String::from));}
@@ -537,6 +548,7 @@ async fn main(spawner: Spawner) -> ! {
             let mut probe_lines=probe.lines.clone();probe_lines.push(sd::status_line());probe_lines.push(battery::status_line());
             let preview=usb::preview(app.settings().payload).map(|text|text.lines().take(20).map(String::from).collect()).unwrap_or_default();
             let live=Live{wifi_status:wifi_status.clone(),wifi_busy:wifi::busy(),aps,wifi_frames,wifi_dropped,
+                eapol:passive.eapol,handshakes:passive.handshakes,pmkids:passive.pmkids,
                 rf_envelope:rf.envelope(),rf_peak:rf.spectrum.peak_channel().unwrap_or(0),rf_packets:rf.packets,rf_dropped:rf.log.dropped(),
                 ble_status:ble_status.clone(),ble_devices,ble_frames,usb_status:usb_status.clone(),usb_percent,usb_keystrokes,usb_unsupported,
                 buttons:buttons.levels(),probe_lines,message:app.message(),usb_paused:app.usb_paused(),
@@ -550,7 +562,7 @@ async fn main(spawner: Spawner) -> ! {
                     Some(Tool::BleGatt) if !ble::busy()=>Some(ble_status.as_str()),
                     _=>None,
                 };
-                if let Some(status)=finished{app.finish(status);active_tool=None;}
+                if let Some(status)=finished{export_findings(active_tool,&rf);app.finish(status);active_tool=None;}
             }
             if let Ok(panel)=display.as_mut(){if app.take_dirty(){app.render(panel);panel.present();}}
             last_render_ms=now_ms;
