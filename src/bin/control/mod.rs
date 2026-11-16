@@ -27,10 +27,14 @@ pub fn start(tool:Tool,app:&mut App,rf:&mut RfRuntime<'_>,flags:Flags)->Result<(
   },
   Tool::WifiHandshake=>{let mut filter=filter;filter.eapol_only=true;queued(wifi::submit(WifiCommand::Observe{channel:s.channel,filter,record:true}))},
   Tool::PktStream=>{if !flags.usb{return Err("Connect native USB CDC to a host");}queued(wifi::submit(WifiCommand::Stream{channel:s.channel,filter}))},
-  Tool::WifiBeacon|Tool::WifiDeauth=>{if s.channel==0{return Err("Choose a fixed channel for this existing test");}queued(wifi::submit(WifiCommand::Attack{mode:if tool==Tool::WifiBeacon{cyberdeck_core::wifi::attack::AttackMode::BeaconSpam}else{cyberdeck_core::wifi::attack::AttackMode::Deauth},channel:s.channel}))},
+  Tool::WifiBeacon|Tool::WifiDeauth=>{if s.channel==0{return Err("Choose a fixed channel for this existing test");}
+   let mode=if tool==Tool::WifiBeacon{cyberdeck_core::wifi::attack::AttackMode::BeaconSpam}else{cyberdeck_core::wifi::attack::AttackMode::Deauth};
+   // Deauth aims at the selected network; beacon spam rotates its own identity.
+   let target=if tool==Tool::WifiDeauth{let(_,aps,_,_)=wifi::snapshot();Some(aps.get(usize::from(s.target)).ok_or("Scan Wi-Fi first and select a target network")?.bssid)}else{None};
+   queued(wifi::submit(WifiCommand::Attack{mode,channel:s.channel,target}))},
   Tool::PktFiles=>{if !sd::ready(){return Err("Insert a writable microSD card");}queued(sd::request_list())},
   Tool::BleScan=>{if !flags.ble{return Err("BLE radio unavailable");}queued(ble::submit(BleCommand::Scan))},
-  Tool::BleSpam=>{let campaign=cyberdeck_core::ble::spam::SpamCampaign::from_index(s.target as usize).unwrap_or(cyberdeck_core::ble::spam::SpamCampaign::IBeacon);queued(ble::submit(BleCommand::Advertise(campaign)))},
+  Tool::BleSpam=>{let campaign=cyberdeck_core::ble::spam::SpamCampaign::from_index(s.campaign as usize).unwrap_or(cyberdeck_core::ble::spam::SpamCampaign::IBeacon);queued(ble::submit(BleCommand::Advertise(campaign)))},
   Tool::BleGatt=>queued(ble::submit(BleCommand::Inspect{index:s.target})),
   Tool::BleHid=>queued(ble::submit(BleCommand::HidListen{payload:s.payload,layout})),
   Tool::HidIntro|Tool::HidDucky=>{if !flags.usb{return Err("Native USB HID unavailable");}queued(usb::submit(UsbCommand::RunPayload{index:s.payload,layout}))},

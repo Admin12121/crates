@@ -78,12 +78,14 @@ pub struct Settings {
     pub payload:u8,
     /// AP/device/file index, or last octet of a local network host.
     pub target:u8,
+    /// BLE advertising campaign index for the Bluetooth screen.
+    pub campaign:u8,
     pub stream:bool,
     pub rf_rate:u8,
     pub rf_payload_len:u8,
 }
 impl Default for Settings {
-    fn default()->Self {Self {channel:1,filter:PacketFilter::All,layout:KeyboardLayout::Us,payload:0,target:0,stream:false,rf_rate:1,rf_payload_len:32}}
+    fn default()->Self {Self {channel:1,filter:PacketFilter::All,layout:KeyboardLayout::Us,payload:0,target:0,campaign:0,stream:false,rf_rate:1,rf_payload_len:32}}
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action { None, Start(Tool), Stop, Pause(bool), FilePreview(u8), FileRecover(u8) }
@@ -122,7 +124,7 @@ impl Live {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen { Home, Group(Group), Setup(Tool), Running(Tool), Results(Tool), Unavailable(Tool), Edit(Tool,bool), Diagnostics }
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
-enum Field { Run, Channel, Filter, Layout, Payload, Target, Stream, Network, Ssid, Password, Previous, RfRate, RfLength, FileRecover }
+enum Field { Run, Channel, Filter, Layout, Payload, Target, Stream, Network, Ssid, Password, Previous, RfRate, RfLength, FileRecover, Campaign }
 pub struct App {
     screen:Screen,home_index:usize,tool_index:usize,setup_index:usize,scroll:usize,
     registry:PeripheralRegistry,live:Live,settings:Settings,availability:Vec<(Tool,Option<String>)>,payloads:Vec<String>,
@@ -205,10 +207,12 @@ impl App {
             Tool::WifiScan|Tool::WifiCapture|Tool::WifiHandshake|Tool::WifiWps|Tool::WifiClients|Tool::PktCapture|Tool::PktAnalyse=>fields.extend([Field::Channel,Field::Filter]),
             Tool::WifiEvilTwin=>fields.extend([Field::Channel,Field::Ssid]),
             Tool::WifiKarma=>fields.push(Field::Channel),
-            Tool::WifiBeacon|Tool::WifiDeauth=>fields.extend([Field::Channel,Field::Target]),
+            Tool::WifiDeauth=>fields.extend([Field::Channel,Field::Target]),
+            Tool::WifiBeacon=>fields.push(Field::Channel),
             Tool::PktStream=>fields.extend([Field::Channel,Field::Filter,Field::Stream]),
             Tool::PktFiles=>fields.extend([Field::Target,Field::FileRecover]),
-            Tool::BleScan|Tool::BleSpam|Tool::BleGatt=>fields.push(Field::Target),
+            Tool::BleScan|Tool::BleGatt=>fields.push(Field::Target),
+            Tool::BleSpam=>fields.push(Field::Campaign),
             Tool::BleHid=>fields.extend([Field::Payload,Field::Layout]),
             Tool::HidIntro|Tool::HidDucky=>fields.extend([Field::Payload,Field::Layout]),
             Tool::RfSpectrum=>fields.push(Field::Channel),
@@ -227,9 +231,10 @@ impl App {
             Field::Layout=>self.settings.layout=match self.settings.layout {KeyboardLayout::Us=>KeyboardLayout::Uk,KeyboardLayout::Uk=>KeyboardLayout::De,KeyboardLayout::De=>KeyboardLayout::Us},
             Field::Payload=>if !self.payloads.is_empty(){self.settings.payload=((usize::from(self.settings.payload)+1)%self.payloads.len()) as u8;},
             Field::Target=>{
-                let count=match tool {Tool::PktFiles=>self.live.capture_files.len(),Tool::WifiBeacon|Tool::WifiDeauth=>self.live.aps.len(),Tool::BleScan|Tool::BleSpam|Tool::BleGatt|Tool::BleHid=>self.live.ble_devices.len(),_=>255};
+                let count=match tool {Tool::PktFiles=>self.live.capture_files.len(),Tool::WifiBeacon|Tool::WifiDeauth=>self.live.aps.len(),Tool::BleScan|Tool::BleGatt|Tool::BleHid=>self.live.ble_devices.len(),_=>255};
                 self.settings.target=if matches!(tool,Tool::NetProbe|Tool::NetServices|Tool::NetDiscover){self.settings.target%254+1}else{((usize::from(self.settings.target)+1)%count.max(1)) as u8};
             },
+            Field::Campaign=>self.settings.campaign=(self.settings.campaign+1)%cyberdeck_core::ble::spam::SpamCampaign::all().len() as u8,
             Field::Stream=>self.settings.stream=!self.settings.stream,
             Field::RfRate=>self.settings.rf_rate=(self.settings.rf_rate+1)%3,
             Field::RfLength=>self.settings.rf_payload_len=self.settings.rf_payload_len%32+1,
@@ -365,12 +370,16 @@ impl App {
                 let target=usize::from(self.settings.target);
                 let name=match tool {
                     Tool::WifiBeacon|Tool::WifiDeauth=>self.live.aps.get(target).map(|ap|ap.ssid.clone()).unwrap_or_else(||String::from("No network observed")),
-                    Tool::BleScan|Tool::BleSpam|Tool::BleGatt|Tool::BleHid=>self.live.ble_devices.get(target).map(|device|if device.name.is_empty(){device.address.clone()}else{device.name.clone()}).unwrap_or_else(||String::from("No device observed")),
+                    Tool::BleScan|Tool::BleGatt|Tool::BleHid=>self.live.ble_devices.get(target).map(|device|if device.name.is_empty(){device.address.clone()}else{device.name.clone()}).unwrap_or_else(||String::from("No device observed")),
                     Tool::NetProbe|Tool::NetServices=>format!("Local host .{}",self.settings.target),
                     Tool::PktFiles=>self.live.capture_files.get(target).cloned().unwrap_or_else(||String::from("No capture selected")),
                     _=>format!("Item {}",target+1),
                 };
                 (String::from("Target"),name)
+            },
+            Field::Campaign=>{
+                let label=cyberdeck_core::ble::spam::SpamCampaign::from_index(usize::from(self.settings.campaign)).map(|campaign|campaign.label()).unwrap_or("Unknown");
+                (String::from("Campaign"),String::from(label))
             },
             Field::Stream=>(String::from("USB stream"),String::from(if self.settings.stream {"Enabled"}else{"Disabled"})),
             Field::Network=>(String::from("Scanned network"),self.live.aps.get(usize::from(self.settings.target)).map(|ap|ap.ssid.clone()).unwrap_or_else(||String::from("Scan Wi-Fi first"))),

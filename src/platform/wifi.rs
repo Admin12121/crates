@@ -151,7 +151,8 @@ pub enum WifiCommand {
     Stream { channel:u8,filter:CaptureFilter },
     Connect { ssid:String,password:String },
     Disconnect,
-    Attack { mode: AttackMode, channel: u8 },
+    /// Management-frame injection; `target` aims deauth at one BSSID.
+    Attack { mode: AttackMode, channel: u8, target: Option<MacAddr> },
     /// Captive portal: open AP plus DHCP/DNS/HTTP on the portal address.
     Portal { ssid:String, channel:u8, template:PortalTemplate },
     Stop,
@@ -247,8 +248,8 @@ pub async fn run(controller: WifiController<'static>) -> ! {
             Some(WifiCommand::Capture { channel }) => {
                 capture_session(&mut controller, channel).await;
             }
-            Some(WifiCommand::Attack { mode, channel }) => {
-                attack_session(&mut controller, mode, channel).await;
+            Some(WifiCommand::Attack { mode, channel, target }) => {
+                attack_session(&mut controller, mode, channel, target).await;
             }
 
             Some(WifiCommand::Observe{channel,filter,record})=>monitor_session(&mut controller,channel,filter,record,false).await,
@@ -340,6 +341,7 @@ async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filt
     if stream&&!super::usb::pcap_start(){set_status("USB CDC host not connected or stream busy");return}
     if record&&!super::sd::ready(){set_status("capture requires mounted SD; use live observer");return}
     reset_counters(initial_channel.get());
+    reset_observations();
     let name=if record{super::sd::next_name("CAPTURE","PCAP")}else{String::new()};
     let mut pcap=if record||stream{
         match PcapWriter::new(ChunkSink::new(name.clone(),stream),(SNAP_LEN+Radiotap::LEN)as u32,true,MAX_CAPTURE_BYTES){
@@ -394,11 +396,17 @@ async fn monitor_session(controller:&mut WifiController<'static>,channel:u8,filt
     let frames=snapshot().2;
     set_status(&alloc::format!("stopped: {frames} frames; {suffix}{}{}",error.map(|e|alloc::format!("; capture error: {e}")).unwrap_or_default(),if disabled.is_err(){"; driver stop error"}else{""}));
 }
-async fn attack_session(controller: &mut WifiController<'static>, mode: AttackMode, channel: u8) {
+async fn attack_session(controller: &mut WifiController<'static>, mode: AttackMode, channel: u8, target: Option<MacAddr>) {
     reset_counters(channel);
+    // Frames only land on the intended network when the radio actually sits
+    // on the planned channel; the driver never retunes by itself.
+    if let Err(e)=controller.set_channel(channel,SecondaryChannel::None){finish_session(&alloc::format!("channel tune failed: {e:?}"));return}
     let plan = AttackPlan::new(mode, channel);
     let mut runner = AttackRunner::new(plan, 0xC1BE_2DEC, 0);
-    set_status(mode.label());
+    // A selected AP turns broadcast deauth into a per-BSSID test; beacon spam
+    // keeps rotating its own identity, so it never pins the runner.
+    if let Some(bssid)=target{runner.set_bssids(&[bssid]);}
+    set_status(&match target{Some(bssid)=>alloc::format!("{} target {bssid}",mode.label()),None=>String::from(mode.label())});
     let mut sniffer = controller.sniffer();
     let mut frame = FrameBuffer::new();
     loop {
@@ -456,6 +464,10 @@ impl ProbeRow{
 pub struct PassiveSnapshot{pub aps:Vec<ApRow>,pub clients:Vec<ClientRow>,pub wps:Vec<WpsRow>,pub probes:Vec<ProbeRow>,pub probe_ssids:u32,pub frames:Vec<InspectorRow>,pub eapol:u32,pub handshakes:u32,pub pmkids:u32,pub histogram:String}
 type Observer=PassiveEngine<24,32,8,12>;
 static OBSERVER:Mutex<RefCell<Observer>>=Mutex::new(RefCell::new(Observer::new()));
+/// A monitor session starts with empty observation tables. Results screens
+/// keep their saved copy, so this never erases what the operator already saw;
+/// without it, clients/probes/WPS/handshakes would mix across sessions.
+fn reset_observations(){critical_section::with(|cs|{*OBSERVER.borrow_ref_mut(cs)=Observer::new();});}
 
 /// Portal address: the AP takes .1 and hands clients .100 and up on its own /24.
 const PORTAL_IP:[u8;4]=[192,168,4,1];
