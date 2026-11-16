@@ -190,7 +190,8 @@ impl JobManager {
     ) -> Result<(OpId, CancelToken), DeckError> {
         for resource in resources {
             if let Some(job) = self.jobs.iter().find(|j| {
-                j.leases_resource(*resource) && matches!(j.state, JobState::Running | JobState::Paused)
+                j.leases_resource(*resource)
+                    && matches!(j.state, JobState::Running | JobState::Paused)
             }) {
                 return Err(DeckError::Busy {
                     resource: resource.label(),

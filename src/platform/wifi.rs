@@ -7,16 +7,25 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use critical_section::Mutex;
 use cyberdeck_core::net::MacAddr;
+use cyberdeck_core::pcap::{MAX_CAPTURE_BYTES, PcapSink, PcapWriter, SNAPLEN_DEFAULT};
+use cyberdeck_core::time::Timestamp;
 use cyberdeck_core::wifi::ap::Ssid;
 use cyberdeck_core::wifi::attack::{AttackMode, AttackPlan, AttackRunner};
 use cyberdeck_core::wifi::frame::{self, FrameBuffer};
 use esp_radio::wifi::ap::AccessPointInfo;
 use esp_radio::wifi::scan::ScanConfig;
-use esp_radio::wifi::{Config, WifiController};
 use esp_radio::wifi::sta::StationConfig;
+use esp_radio::wifi::{Config, WifiController};
+
+/// Set by the UI so a running session can be interrupted without the command slot.
+static CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// Bytes buffered before a streaming pcap chunk is queued to the storage actor.
+const PCAP_CHUNK_BYTES: usize = 8192;
 
 /// Largest frame retained from the promiscuous callback.
 pub const SNAP_LEN: usize = 512;
@@ -97,6 +106,59 @@ fn receive(packet: esp_radio::wifi::sniffer::PromiscuousPkt) {
     critical_section::with(|cs| RX.borrow_ref_mut(cs).push(frame));
 }
 
+/// Streams pcap bytes to the SD actor as append-only chunks.
+struct ChunkSink {
+    name: String,
+    buffer: Vec<u8>,
+    bytes: u64,
+    dropped: u32,
+}
+
+impl ChunkSink {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            buffer: Vec::new(),
+            bytes: 0,
+            dropped: 0,
+        }
+    }
+
+    fn flush_chunks(&mut self) {
+        if self.buffer.len() < PCAP_CHUNK_BYTES {
+            return;
+        }
+        let chunk = core::mem::take(&mut self.buffer);
+        let len = chunk.len() as u64;
+        if super::sd::enqueue(&self.name, chunk, true) {
+            self.bytes += len;
+        } else {
+            self.dropped = self.dropped.saturating_add(1);
+        }
+    }
+
+    fn finish(mut self) -> (u64, u32) {
+        if !self.buffer.is_empty() {
+            let chunk = core::mem::take(&mut self.buffer);
+            let len = chunk.len() as u64;
+            if super::sd::enqueue(&self.name, chunk, true) {
+                self.bytes += len;
+            } else {
+                self.dropped = self.dropped.saturating_add(1);
+            }
+        }
+        (self.bytes, self.dropped)
+    }
+}
+
+impl PcapSink for ChunkSink {
+    fn write_all(&mut self, data: &[u8]) -> Result<(), cyberdeck_core::error::DeckError> {
+        self.buffer.extend_from_slice(data);
+        self.flush_chunks();
+        Ok(())
+    }
+}
+
 /// One access-point row for the UI.
 #[derive(Clone)]
 pub struct ApRow {
@@ -148,6 +210,11 @@ pub enum WifiCommand {
 
 /// Submit a command; returns false when the actor is still busy.
 pub fn submit(command: WifiCommand) -> bool {
+    if command == WifiCommand::Stop {
+        CANCEL.store(true, Ordering::Release);
+        return true;
+    }
+    CANCEL.store(false, Ordering::Release);
     critical_section::with(|cs| {
         let mut slot = WIFI_COMMAND.borrow_ref_mut(cs);
         if slot.is_some() {
@@ -256,10 +323,7 @@ pub async fn run(controller: WifiController<'static>) -> ! {
 }
 
 fn stop_requested() -> bool {
-    critical_section::with(|cs| {
-        let state = WIFI_STATE.borrow_ref(cs);
-        state.status == "stopping"
-    })
+    CANCEL.load(Ordering::Acquire)
 }
 
 fn reset_counters(channel: u8) {
@@ -298,34 +362,65 @@ async fn capture_session(controller: &mut WifiController<'static>, channel: u8) 
         return;
     }
     sniffer.set_receive_cb(receive);
-    let mut last_total = 0u32;
+    let mut pcap = if super::sd::ready() {
+        let name = super::sd::next_name("CAPTURE", "PCAP");
+        PcapWriter::new(
+            ChunkSink::new(name),
+            SNAPLEN_DEFAULT,
+            true,
+            MAX_CAPTURE_BYTES,
+        )
+        .ok()
+    } else {
+        None
+    };
+    let mut captured = 0u32;
     loop {
         embassy_time::Timer::after(embassy_time::Duration::from_millis(20)).await;
-        let mut latest = None;
-        let mut drained = 0u32;
-        critical_section::with(|cs| {
-            let mut ring = RX.borrow_ref_mut(cs);
-            while let Some(frame) = ring.pop() {
-                drained += 1;
-                latest = Some(frame);
+        loop {
+            let frame = critical_section::with(|cs| RX.borrow_ref_mut(cs).pop());
+            let Some(frame) = frame else {
+                break;
+            };
+            captured = captured.saturating_add(1);
+            if let Some(writer) = pcap.as_mut() {
+                let channel_mhz = 2407 + u16::from(frame.channel) * 5;
+                let stamp = Timestamp::from_micros(u64::from(captured) * 1000);
+                let _ =
+                    writer.write_frame_on_channel(stamp, frame.bytes(), channel_mhz, frame.rssi);
             }
-            let mut state = WIFI_STATE.borrow_ref_mut(cs);
-            state.frames = state.frames.saturating_add(drained);
-            state.dropped = ring.dropped;
-            if let Some(frame) = latest {
+            critical_section::with(|cs| {
+                let mut state = WIFI_STATE.borrow_ref_mut(cs);
+                state.frames = state.frames.saturating_add(1);
                 state.bytes = state.bytes.saturating_add(u64::from(frame.len));
                 state.last_frame = Some(frame);
-            }
-        });
-        if drained > 0 {
-            last_total = last_total.saturating_add(drained);
+            });
         }
+        critical_section::with(|cs| {
+            let dropped = RX.borrow_ref(cs).dropped;
+            WIFI_STATE.borrow_ref_mut(cs).dropped = dropped;
+        });
         if stop_requested() {
             break;
         }
     }
     let _ = sniffer.set_promiscuous_mode(false);
-    finish_session(&alloc::format!("capture stopped: {last_total} frames"));
+    let suffix = match pcap.map(|writer| writer.finish()) {
+        Some(Ok((sink, stats))) => {
+            let (bytes, dropped) = sink.finish();
+            alloc::format!(
+                ", pcap {} B ({} records, {} unsaved)",
+                bytes,
+                stats.records,
+                dropped
+            )
+        }
+        Some(Err(_)) => String::from(", pcap write error"),
+        None => String::from(", no SD card"),
+    };
+    finish_session(&alloc::format!(
+        "capture stopped: {captured} frames{suffix}"
+    ));
 }
 
 async fn attack_session(controller: &mut WifiController<'static>, mode: AttackMode, channel: u8) {
@@ -339,7 +434,10 @@ async fn attack_session(controller: &mut WifiController<'static>, mode: AttackMo
         embassy_time::Timer::after(embassy_time::Duration::from_millis(10)).await;
         let now_us = embassy_time::Instant::now().as_micros();
         while let Some(_kind) = runner.next_frame(now_us, &mut frame) {
-            if sniffer.send_raw_frame(false, frame.as_slice(), true).is_err() {
+            if sniffer
+                .send_raw_frame(false, frame.as_slice(), true)
+                .is_err()
+            {
                 finish_session("transmit rejected by driver");
                 return;
             }

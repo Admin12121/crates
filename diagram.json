@@ -1,33 +1,254 @@
 {
-    "version": 1,
-    "editor": "wokwi",
-    "parts": [
-        {
-            "type": "board-esp32-s3-devkitc-1",
-            "id": "esp",
-            "top": 0.59,
-            "left": 0.67,
-            "attrs": {
-                "flashSize": "16"
-            }
-        }
-    ],
-    "connections": [
-        [
-            "esp:TX",
-            "$serialMonitor:RX",
-            "",
-            []
-        ],
-        [
-            "esp:RX",
-            "$serialMonitor:TX",
-            "",
-            []
-        ]
-    ],
-    "serialMonitor": {
-        "display": "terminal",
-        "convertEol": true
+  "version": 1,
+  "author": "CyberDeck",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "board-esp32-s3-devkitc-1",
+      "id": "esp",
+      "top": 20,
+      "left": 90,
+      "attrs": {
+        "flashSize": "16",
+        "psramSize": "8",
+        "psramType": "octal"
+      }
+    },
+    {
+      "type": "wokwi-ili9341",
+      "id": "lcd",
+      "top": -80,
+      "left": 370,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-microsd-card",
+      "id": "sd",
+      "top": 205,
+      "left": -155,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "up",
+      "top": 330,
+      "left": 325,
+      "attrs": {
+        "color": "blue",
+        "label": "UP",
+        "key": "ArrowUp",
+        "bounce": "0"
+      }
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "down",
+      "top": 330,
+      "left": 408,
+      "attrs": {
+        "color": "blue",
+        "label": "DOWN",
+        "key": "ArrowDown",
+        "bounce": "0"
+      }
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "select",
+      "top": 330,
+      "left": 491,
+      "attrs": {
+        "color": "green",
+        "label": "SELECT",
+        "key": "Enter",
+        "bounce": "0"
+      }
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "back",
+      "top": 330,
+      "left": 574,
+      "attrs": {
+        "color": "yellow",
+        "label": "BACK",
+        "key": "Escape",
+        "bounce": "0"
+      }
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "home",
+      "top": 330,
+      "left": 657,
+      "attrs": {
+        "color": "red",
+        "label": "HOME",
+        "key": "h",
+        "bounce": "0"
+      }
     }
+  ],
+  "connections": [
+    [
+      "esp:TX",
+      "$serialMonitor:RX",
+      "",
+      []
+    ],
+    [
+      "esp:RX",
+      "$serialMonitor:TX",
+      "",
+      []
+    ],
+    [
+      "esp:3V3.1",
+      "lcd:VCC",
+      "red",
+      []
+    ],
+    [
+      "esp:GND.1",
+      "lcd:GND",
+      "black",
+      []
+    ],
+    [
+      "esp:12",
+      "lcd:SCK",
+      "green",
+      []
+    ],
+    [
+      "esp:11",
+      "lcd:MOSI",
+      "green",
+      []
+    ],
+    [
+      "esp:10",
+      "lcd:CS",
+      "orange",
+      []
+    ],
+    [
+      "esp:9",
+      "lcd:D/C",
+      "blue",
+      []
+    ],
+    [
+      "esp:14",
+      "lcd:RST",
+      "purple",
+      []
+    ],
+    [
+      "esp:13",
+      "lcd:LED",
+      "yellow",
+      []
+    ],
+    [
+      "esp:3V3.1",
+      "sd:VCC",
+      "red",
+      []
+    ],
+    [
+      "esp:GND.1",
+      "sd:GND",
+      "black",
+      []
+    ],
+    [
+      "esp:39",
+      "sd:SCK",
+      "green",
+      []
+    ],
+    [
+      "esp:40",
+      "sd:DI",
+      "green",
+      []
+    ],
+    [
+      "esp:41",
+      "sd:DO",
+      "green",
+      []
+    ],
+    [
+      "esp:42",
+      "sd:CS",
+      "orange",
+      []
+    ],
+    [
+      "esp:4",
+      "up:1.l",
+      "blue",
+      []
+    ],
+    [
+      "up:2.l",
+      "esp:GND.1",
+      "black",
+      []
+    ],
+    [
+      "esp:5",
+      "down:1.l",
+      "blue",
+      []
+    ],
+    [
+      "down:2.l",
+      "esp:GND.1",
+      "black",
+      []
+    ],
+    [
+      "esp:6",
+      "select:1.l",
+      "blue",
+      []
+    ],
+    [
+      "select:2.l",
+      "esp:GND.1",
+      "black",
+      []
+    ],
+    [
+      "esp:7",
+      "back:1.l",
+      "blue",
+      []
+    ],
+    [
+      "back:2.l",
+      "esp:GND.1",
+      "black",
+      []
+    ],
+    [
+      "esp:15",
+      "home:1.l",
+      "blue",
+      []
+    ],
+    [
+      "home:2.l",
+      "esp:GND.1",
+      "black",
+      []
+    ]
+  ],
+  "serialMonitor": {
+    "display": "terminal",
+    "convertEol": true
+  }
 }

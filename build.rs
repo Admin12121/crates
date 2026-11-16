@@ -2,6 +2,11 @@ fn main() {
     // Board profile selection is a build-time switch, not a source edit.
     println!("cargo:rustc-check-cfg=cfg(cyberdeck_board_field)");
     println!("cargo:rerun-if-env-changed=CYBERDECK_BOARD");
+    println!("cargo:rustc-check-cfg=cfg(cyberdeck_sim_wokwi)");
+    println!("cargo:rerun-if-env-changed=CYBERDECK_SIM");
+    if std::env::var("CYBERDECK_SIM").is_ok_and(|mode| mode.eq_ignore_ascii_case("wokwi")) {
+        println!("cargo:rustc-cfg=cyberdeck_sim_wokwi");
+    }
     let board = std::env::var("CYBERDECK_BOARD").unwrap_or_default();
     if board.eq_ignore_ascii_case("field") {
         println!("cargo:rustc-cfg=cyberdeck_board_field");

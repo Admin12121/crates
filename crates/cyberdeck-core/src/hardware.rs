@@ -116,7 +116,9 @@ pub struct PeripheralRegistry {
 
 impl PeripheralRegistry {
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// Insert or replace the state of `class`.
@@ -141,11 +143,7 @@ impl PeripheralRegistry {
         }
         if self.entries.len() >= MAX_DEVICES {
             // Registry is full: drop the oldest *not ready* row rather than growing.
-            if let Some(idx) = self
-                .entries
-                .iter()
-                .position(|e| !e.state.is_ready())
-            {
+            if let Some(idx) = self.entries.iter().position(|e| !e.state.is_ready()) {
                 self.entries.swap_remove(idx);
             } else {
                 return;
@@ -168,7 +166,9 @@ impl PeripheralRegistry {
     }
 
     pub fn is_ready(&self, class: DeviceClass) -> bool {
-        self.state(class).map(DeviceState::is_ready).unwrap_or(false)
+        self.state(class)
+            .map(DeviceState::is_ready)
+            .unwrap_or(false)
     }
 
     /// Mark a device busy for the duration of an operation.
@@ -271,16 +271,12 @@ impl PeripheralRegistry {
 
     /// Look for a present device that could be mistaken for `wanted`.
     pub fn find_substitute(&self, wanted: DeviceClass) -> Option<DeviceClass> {
-        wanted
-            .substitutes()
-            .iter()
-            .copied()
-            .find(|candidate| {
-                matches!(
-                    self.state(*candidate),
-                    Some(DeviceState::Ready | DeviceState::Detected)
-                )
-            })
+        wanted.substitutes().iter().copied().find(|candidate| {
+            matches!(
+                self.state(*candidate),
+                Some(DeviceState::Ready | DeviceState::Detected)
+            )
+        })
     }
 }
 
@@ -394,7 +390,9 @@ mod tests {
         let mut reg = PeripheralRegistry::new();
         reg.set(
             DeviceClass::Nrf24,
-            DeviceState::InitFailed { reason: "no response on SPI" },
+            DeviceState::InitFailed {
+                reason: "no response on SPI",
+            },
             None,
             0,
         );

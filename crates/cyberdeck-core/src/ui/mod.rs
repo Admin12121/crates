@@ -30,7 +30,11 @@ impl Rgb565 {
         let r = ((self.0 >> 11) & 0x1F) as u8;
         let g = ((self.0 >> 5) & 0x3F) as u8;
         let b = (self.0 & 0x1F) as u8;
-        ((r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2))
+        (
+            (r << 3) | (r >> 2),
+            (g << 2) | (g >> 4),
+            (b << 3) | (b >> 2),
+        )
     }
 }
 
@@ -196,12 +200,7 @@ pub fn ellipsize(text: &str, max_chars: usize) -> String {
 }
 
 /// Render a horizontal progress/level bar.
-pub fn draw_bar(
-    canvas: &mut impl Canvas,
-    rect: Rect,
-    fraction_permille: u16,
-    color: Rgb565,
-) {
+pub fn draw_bar(canvas: &mut impl Canvas, rect: Rect, fraction_permille: u16, color: Rgb565) {
     let filled = u32::from(rect.w) * u32::from(fraction_permille.min(1000)) / 1000;
     canvas.fill_rect(rect, theme::SURFACE_ALT);
     if filled > 0 {
@@ -287,14 +286,24 @@ mod tests {
         let lines = wrap("the quick brown fox jumps", 10);
         assert!(lines.iter().all(|line| line.chars().count() <= 10));
         assert_eq!(lines[0], "the quick");
-        assert_eq!(wrap("a\nb", 10), alloc::vec![String::from("a"), String::from("b")]);
+        assert_eq!(
+            wrap("a\nb", 10),
+            alloc::vec![String::from("a"), String::from("b")]
+        );
         assert_eq!(wrap("", 10), alloc::vec![String::new()]);
     }
 
     #[test]
     fn hard_breaks_long_words() {
         let lines = wrap("abcdefghijkl", 5);
-        assert_eq!(lines, alloc::vec![String::from("abcde"), String::from("fghij"), String::from("kl")]);
+        assert_eq!(
+            lines,
+            alloc::vec![
+                String::from("abcde"),
+                String::from("fghij"),
+                String::from("kl")
+            ]
+        );
     }
 
     #[test]
@@ -310,9 +319,19 @@ mod tests {
         canvas.draw_text(0, 0, "HELLO", theme::TEXT, theme::BACKGROUND, 1);
         assert_eq!(canvas.text(), "HELLO");
         draw_bar(&mut canvas, Rect::new(0, 20, 100, 8), 500, theme::ACCENT);
-        assert!(canvas.ops.iter().any(|op| matches!(op, super::testing::Op::Fill(rect, _) if rect.w == 50)));
+        assert!(
+            canvas
+                .ops
+                .iter()
+                .any(|op| matches!(op, super::testing::Op::Fill(rect, _) if rect.w == 50))
+        );
         draw_bar(&mut canvas, Rect::new(0, 30, 100, 8), 2000, theme::ACCENT);
-        assert!(canvas.ops.iter().any(|op| matches!(op, super::testing::Op::Fill(rect, _) if rect.w == 100)));
+        assert!(
+            canvas
+                .ops
+                .iter()
+                .any(|op| matches!(op, super::testing::Op::Fill(rect, _) if rect.w == 100))
+        );
     }
 
     #[test]

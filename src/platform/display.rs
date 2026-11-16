@@ -4,12 +4,12 @@
 //! a few hundred bytes of stack and avoids a 150 KB framebuffer competing with the
 //! Wi-Fi/BLE heap. Full-screen repaints are chunked, so the UI stays responsive.
 
-use cyberdeck_core::ui::{font, Canvas, Rect, Rgb565};
+use cyberdeck_core::ui::{Canvas, Rect, Rgb565, font};
 use embedded_hal::spi::SpiBus;
+use esp_hal::Blocking;
 use esp_hal::delay::Delay;
 use esp_hal::gpio::Output;
 use esp_hal::spi::master::Spi;
-use esp_hal::Blocking;
 
 use cyberdeck_core::board::{DisplayController, DisplayGeometry};
 
@@ -103,7 +103,10 @@ impl<'d> Display<'d> {
         self.command(CMD_COLMOD, &[0x55])?;
         // No mirroring/rotation for the reference panel.
         self.command(CMD_MADCTL, &[0x00])?;
-        self.command(CMD_INVON, &[])?;
+        // Inversion is required by the ST7789 panel, not the Wokwi ILI9341 model.
+        if self.controller == DisplayController::St7789 {
+            self.command(CMD_INVON, &[])?;
+        }
         self.command(CMD_NORON, &[])?;
         self.command(CMD_DISPON, &[])?;
         self.delay.delay_millis(20);
@@ -123,6 +126,13 @@ impl<'d> Display<'d> {
 
     fn command(&mut self, cmd: u8, data: &[u8]) -> Result<(), DisplayError> {
         self.cs.set_low();
+        let result = self.command_held(cmd, data);
+        self.cs.set_high();
+        result
+    }
+
+    /// Same as [`Self::command`] but leaves chip-select asserted by the caller.
+    fn command_held(&mut self, cmd: u8, data: &[u8]) -> Result<(), DisplayError> {
         self.dc.set_low();
         let mut byte = [cmd];
         SpiBus::write(&mut self.spi, &mut byte).map_err(|_| DisplayError::BusWrite)?;
@@ -135,26 +145,27 @@ impl<'d> Display<'d> {
                     .map_err(|_| DisplayError::BusWrite)?;
             }
         }
-        self.cs.set_high();
         Ok(())
     }
 
-    fn set_window(&mut self, rect: Rect) -> Result<(), DisplayError> {
+    fn set_window_held(&mut self, rect: Rect) -> Result<(), DisplayError> {
         let x0 = rect.x.max(0) as u16;
         let y0 = rect.y.max(0) as u16;
-        let x1 = (rect.right().max(0) as u16).saturating_sub(1).min(self.width - 1);
+        let x1 = (rect.right().max(0) as u16)
+            .saturating_sub(1)
+            .min(self.width - 1);
         let y1 = (rect.bottom().max(0) as u16)
             .saturating_sub(1)
             .min(self.height - 1);
-        self.command(
+        self.command_held(
             CMD_CASET,
             &[(x0 >> 8) as u8, x0 as u8, (x1 >> 8) as u8, x1 as u8],
         )?;
-        self.command(
+        self.command_held(
             CMD_RASET,
             &[(y0 >> 8) as u8, y0 as u8, (y1 >> 8) as u8, y1 as u8],
         )?;
-        self.command(CMD_RAMWR, &[])?;
+        self.command_held(CMD_RAMWR, &[])?;
         Ok(())
     }
 }
@@ -181,7 +192,9 @@ impl Canvas for Display<'_> {
         if clipped.w == 0 || clipped.h == 0 {
             return;
         }
-        if self.set_window(clipped).is_err() {
+        self.cs.set_low();
+        if self.set_window_held(clipped).is_err() {
+            self.cs.set_high();
             return;
         }
         let pixel = color.0.to_be_bytes();
@@ -200,6 +213,7 @@ impl Canvas for Display<'_> {
             }
             remaining -= pixels as u32;
         }
+        self.cs.set_high();
     }
 
     fn draw_glyph(&mut self, x: i16, y: i16, ch: char, color: Rgb565, bg: Rgb565, scale: u8) {
@@ -213,7 +227,9 @@ impl Canvas for Display<'_> {
             // Partial glyphs would need per-pixel clipping; skip instead of wrapping.
             return;
         }
-        if self.set_window(Rect::new(x, y, w, h)).is_err() {
+        self.cs.set_low();
+        if self.set_window_held(Rect::new(x, y, w, h)).is_err() {
+            self.cs.set_high();
             return;
         }
         let mut row = [0u8; 32]; // up to 16 pixels wide
@@ -235,10 +251,12 @@ impl Canvas for Display<'_> {
                     }
                 }
                 if SpiBus::write(&mut self.spi, &mut row[..offset]).is_err() {
+                    self.cs.set_high();
                     return;
                 }
             }
         }
+        self.cs.set_high();
     }
 
     fn present(&mut self) {}

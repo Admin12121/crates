@@ -7,9 +7,9 @@
 
 use cyberdeck_core::rf::nrf24::*;
 use embedded_hal::spi::SpiBus;
+use esp_hal::Blocking;
 use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::spi::master::Spi;
-use esp_hal::Blocking;
 
 /// Driver failure with an actionable message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,8 +92,8 @@ impl<'d> Nrf24<'d> {
     fn command(&mut self, command: u8) -> Result<(), Nrf24Error> {
         self.csn.set_low();
         let mut read = [0u8; 1];
-        let result = SpiBus::transfer(&mut self.spi, &mut read, &[command])
-            .map_err(|_| Nrf24Error::Bus);
+        let result =
+            SpiBus::transfer(&mut self.spi, &mut read, &[command]).map_err(|_| Nrf24Error::Bus);
         self.csn.set_high();
         result
     }
@@ -138,14 +138,20 @@ impl<'d> Nrf24<'d> {
     }
 
     /// Sample one channel and fold it into the supplied spectrum model.
-    pub fn sample(&mut self, spectrum: &mut cyberdeck_core::rf::spectrum::Spectrum) -> Result<bool, Nrf24Error> {
+    pub fn sample(
+        &mut self,
+        spectrum: &mut cyberdeck_core::rf::spectrum::Spectrum,
+    ) -> Result<bool, Nrf24Error> {
         let asserted = self.rpd()?;
         spectrum.apply(self.channel, asserted);
         Ok(asserted)
     }
 
     /// Pop one received payload, if any.
-    pub fn read_packet(&mut self, buffer: &mut [u8; MAX_PAYLOAD as usize]) -> Result<Option<(u8, u8)>, Nrf24Error> {
+    pub fn read_packet(
+        &mut self,
+        buffer: &mut [u8; MAX_PAYLOAD as usize],
+    ) -> Result<Option<(u8, u8)>, Nrf24Error> {
         let status = self.read_register(REG_STATUS)?;
         let pipe = (status >> 1) & 0x07;
         if pipe == STATUS_RX_P_NO_EMPTY {
@@ -159,13 +165,22 @@ impl<'d> Nrf24<'d> {
         let mut write = [0xFFu8; MAX_PAYLOAD as usize + 1];
         write[0] = CMD_R_RX_PAYLOAD;
         let mut read = [0u8; MAX_PAYLOAD as usize + 1];
-        let result = SpiBus::transfer(&mut self.spi, &mut read, &write)
-            .map_err(|_| Nrf24Error::Bus);
+        let result =
+            SpiBus::transfer(&mut self.spi, &mut read, &write).map_err(|_| Nrf24Error::Bus);
         self.csn.set_high();
         result?;
         buffer[..width].copy_from_slice(&read[1..1 + width]);
         self.write_register(REG_STATUS, STATUS_RX_DR)?;
         Ok(Some((pipe, width as u8)))
+    }
+
+    /// Assert or release CE, which is what actually starts/stops the RX state.
+    pub fn rx_mode(&mut self, enable: bool) {
+        if enable {
+            self.ce.set_high();
+        } else {
+            self.ce.set_low();
+        }
     }
 
     pub fn power_down(&mut self) -> Result<(), Nrf24Error> {

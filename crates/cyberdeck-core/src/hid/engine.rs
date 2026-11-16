@@ -9,10 +9,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::ducky::{Command, Script, MAX_COMMANDS};
-use super::{
-    ConsumerReport, KeyboardReport, Layout, MouseReport, modifier,
-};
+use super::ducky::{Command, MAX_COMMANDS, Script};
+use super::{ConsumerReport, KeyboardReport, Layout, MouseReport, modifier};
 
 /// Upper bound on the expanded execution plan (`REPEAT` expansion included).
 pub const MAX_PLAN: usize = 8192;
@@ -251,8 +249,7 @@ impl HidEngine {
                         self.unsupported_chars = self.unsupported_chars.saturating_add(1);
                         // Skip the remainder of a multi-byte UTF-8 sequence so one
                         // character is reported once, not once per byte.
-                        while self.text_index < text.len()
-                            && (text[self.text_index] & 0xC0) == 0x80
+                        while self.text_index < text.len() && (text[self.text_index] & 0xC0) == 0x80
                         {
                             self.text_index += 1;
                         }
@@ -519,7 +516,10 @@ mod tests {
             })
             .collect();
         assert_eq!(presses.len(), 2);
-        assert_eq!(presses[0].modifiers & modifier::LEFT_SHIFT, modifier::LEFT_SHIFT);
+        assert_eq!(
+            presses[0].modifiers & modifier::LEFT_SHIFT,
+            modifier::LEFT_SHIFT
+        );
         assert_eq!(presses[0].keycodes[0], key::A);
         assert_eq!(presses[1].keycodes[0], key::ONE);
     }

@@ -257,7 +257,10 @@ mod tests {
         assert_eq!(channels.first(), Some(&3));
         assert_eq!(channels.last(), Some(&81));
         for channel in &channels {
-            assert!(super::super::nrf24::channel_for_mhz(super::super::nrf24::frequency_mhz(*channel)).is_some());
+            assert!(
+                super::super::nrf24::channel_for_mhz(super::super::nrf24::frequency_mhz(*channel))
+                    .is_some()
+            );
         }
         assert_eq!(MOUSEJACK_ADDRESSES.len(), 2);
         assert_eq!(MOUSEJACK_ADDRESS_WIDTH, 0x03);

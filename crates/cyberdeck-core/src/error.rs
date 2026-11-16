@@ -155,8 +155,9 @@ impl DeckError {
             Self::InitFailed { device, reason } => {
                 format!(
                     "{} failed to initialise ({reason}). {operation} is unavailable; \
-                     check wiring and retry detection."
-                , device.label())
+                     check wiring and retry detection.",
+                    device.label()
+                )
             }
             Self::Busy { resource, owner } => format!(
                 "{resource} is busy: {owner} is running. Stop it before starting {operation}."
@@ -169,7 +170,9 @@ impl DeckError {
                 }
                 out
             }
-            Self::Storage { reason } => format!("Storage unavailable ({reason}). {operation} cannot persist results."),
+            Self::Storage { reason } => {
+                format!("Storage unavailable ({reason}). {operation} cannot persist results.")
+            }
             Self::InvalidInput { reason } => format!("{operation}: {reason}."),
             Self::Timeout { what } => format!("{operation} timed out waiting for {what}."),
             Self::Cancelled => format!("{operation} cancelled."),
@@ -225,7 +228,10 @@ mod tests {
             resource: "Wi-Fi radio",
             owner: "Deauth Test",
         };
-        assert!(err.describe("Packet Capture").contains("Deauth Test is running"));
+        assert!(
+            err.describe("Packet Capture")
+                .contains("Deauth Test is running")
+        );
     }
 
     #[test]

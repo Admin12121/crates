@@ -424,9 +424,7 @@ mod tests {
             wheel: 1,
         };
         assert_eq!(mouse.to_bytes(), [0x01, 5, 0xFD, 1]);
-        let consumer = ConsumerReport {
-            usage: media::MUTE,
-        };
+        let consumer = ConsumerReport { usage: media::MUTE };
         assert_eq!(consumer.to_bytes(), [0xE2, 0x00]);
     }
 

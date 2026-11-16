@@ -5,11 +5,12 @@
 //! §3A.8), so constructors return `Result` and callers record the outcome in the
 //! peripheral registry instead of unwrapping.
 
+pub mod battery;
 pub mod ble;
 pub mod display;
+pub mod export;
 pub mod input;
 pub mod nrf24;
-pub mod export;
 pub mod probe;
 pub mod sd;
 pub mod usb;

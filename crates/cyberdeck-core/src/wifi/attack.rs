@@ -10,9 +10,7 @@ use alloc::vec::Vec;
 
 use crate::net::MacAddr;
 
-use super::frame::{
-    self, BeaconOptions, FrameBuffer, reason,
-};
+use super::frame::{self, BeaconOptions, FrameBuffer, reason};
 
 /// Injection modes supported by the CORE/FIELD Wi-Fi radio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,7 +106,11 @@ pub struct Rng(u64);
 
 impl Rng {
     pub const fn new(seed: u64) -> Self {
-        Self(if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed })
+        Self(if seed == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            seed
+        })
     }
 
     pub fn next_u64(&mut self) -> u64 {
@@ -247,7 +249,8 @@ impl AttackRunner {
 
     /// True when the plan's duration elapsed.
     pub fn should_stop(&self, now_ms: u64) -> bool {
-        self.plan.duration_ms != 0 && now_ms.saturating_sub(self.started_ms) >= self.plan.duration_ms
+        self.plan.duration_ms != 0
+            && now_ms.saturating_sub(self.started_ms) >= self.plan.duration_ms
     }
 
     /// Produce the next frame if the cadence allows it.

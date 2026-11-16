@@ -58,7 +58,11 @@ pub struct DeviceId {
 
 impl DeviceId {
     /// Build a fingerprint from the advertisement's stable fields.
-    pub fn from_advertisement(name: Option<&[u8]>, manufacturer: Option<&[u8]>, services: u32) -> Self {
+    pub fn from_advertisement(
+        name: Option<&[u8]>,
+        manufacturer: Option<&[u8]>,
+        services: u32,
+    ) -> Self {
         let mut hash: u32 = 0x811C_9DC5;
         let mut mix = |byte: u8| {
             hash ^= u32::from(byte);
@@ -284,7 +288,9 @@ impl AdvReport {
 
         for structure in parse_ad_structures(data) {
             match structure.kind {
-                AD_NAME_COMPLETE | AD_NAME_SHORT if name.is_none() && !structure.data.is_empty() => {
+                AD_NAME_COMPLETE | AD_NAME_SHORT
+                    if name.is_none() && !structure.data.is_empty() =>
+                {
                     name = Some(structure.data.to_vec());
                 }
                 AD_MANUFACTURER if manufacturer.is_none() && structure.data.len() >= 2 => {
@@ -309,11 +315,8 @@ impl AdvReport {
         }
 
         let services_mask = uuids.iter().fold(0u32, |acc, u| acc | (1 << (u.0 % 32)));
-        let identity = DeviceId::from_advertisement(
-            name.as_deref(),
-            manufacturer.as_deref(),
-            services_mask,
-        );
+        let identity =
+            DeviceId::from_advertisement(name.as_deref(), manufacturer.as_deref(), services_mask);
         let display_name = name.as_ref().map(|n| printable(n));
 
         Self {
@@ -425,7 +428,8 @@ impl<const N: usize> AdvTable<N> {
         {
             existing.address = report.address;
             existing.rssi = report.rssi;
-            existing.rssi_avg16 = existing.rssi_avg16 + (report.rssi_avg16 - existing.rssi_avg16) / 4;
+            existing.rssi_avg16 =
+                existing.rssi_avg16 + (report.rssi_avg16 - existing.rssi_avg16) / 4;
             existing.last_seen_ms = report.last_seen_ms;
             existing.count = existing.count.saturating_add(1);
             if existing.name.is_none() {
@@ -473,11 +477,15 @@ mod tests {
     #[test]
     fn parses_apple_continuity_advertisement() {
         // Flags + a complete 25-byte Apple iBeacon manufacturer body.
-        let payload = hex_to_vec(
-            "0201061AFF4C000215000102030405060708090A0B0C0D0E0F01000102C5",
-        )
-        .unwrap();
-        let report = AdvReport::parse(BleAddress::new([1, 2, 3, 4, 5, 6]), -62, &payload, false, 10);
+        let payload =
+            hex_to_vec("0201061AFF4C000215000102030405060708090A0B0C0D0E0F01000102C5").unwrap();
+        let report = AdvReport::parse(
+            BleAddress::new([1, 2, 3, 4, 5, 6]),
+            -62,
+            &payload,
+            false,
+            10,
+        );
         assert_eq!(report.company_id(), Some(0x004C));
         assert_eq!(report.company_payload().len(), 23);
         assert_eq!(report.signal_dbm(), -62);
@@ -490,13 +498,7 @@ mod tests {
         assert!(builder.flags(0x06));
         assert!(builder.name(b"CyberTag"));
         assert!(builder.push(AD_UUID16_COMPLETE, &[0x0F, 0x18]));
-        let report = AdvReport::parse(
-            BleAddress::new([0xAA; 6]),
-            -50,
-            builder.as_slice(),
-            true,
-            1,
-        );
+        let report = AdvReport::parse(BleAddress::new([0xAA; 6]), -50, builder.as_slice(), true, 1);
         assert_eq!(report.label(), "CyberTag");
         assert_eq!(report.service_uuids[0].0, 0x180F);
         assert_eq!(report.service_uuids[0].label(), "Battery");

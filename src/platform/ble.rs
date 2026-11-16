@@ -1,13 +1,16 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-use bt_hci::cmd::le::{LeSetAdvData, LeSetAdvEnable, LeSetAdvParams, LeSetScanEnable, LeSetScanParams};
-use bt_hci::controller::{Controller, ControllerCmdSync, ExternalController};
 use bt_hci::FromHciBytes;
+use bt_hci::cmd::le::{
+    LeSetAdvData, LeSetAdvEnable, LeSetAdvParams, LeSetScanEnable, LeSetScanParams,
+};
+use bt_hci::controller::{Controller, ControllerCmdSync, ExternalController};
 use bt_hci::event::le::LeAdvertisingReport;
 use bt_hci::param::{
-    AdvChannelMap, AdvKind, AddrKind, BdAddr, Duration, LeScanKind, ScanningFilterPolicy,
+    AddrKind, AdvChannelMap, AdvKind, BdAddr, Duration, LeScanKind, ScanningFilterPolicy,
 };
 use critical_section::Mutex;
 use cyberdeck_core::ble::ad::{AdvReport, BleAddress};
@@ -51,6 +54,9 @@ impl BleState {
     }
 }
 
+/// Set by the UI so a running session can be interrupted without the command slot.
+static CANCEL: AtomicBool = AtomicBool::new(false);
+
 static STATE: Mutex<RefCell<BleState>> = Mutex::new(RefCell::new(BleState::new()));
 static COMMAND: Mutex<RefCell<Option<BleCommand>>> = Mutex::new(RefCell::new(None));
 
@@ -62,6 +68,11 @@ pub enum BleCommand {
 }
 
 pub fn submit(command: BleCommand) -> bool {
+    if command == BleCommand::Stop {
+        CANCEL.store(true, Ordering::Release);
+        return true;
+    }
+    CANCEL.store(false, Ordering::Release);
     critical_section::with(|cs| {
         let mut slot = COMMAND.borrow_ref_mut(cs);
         if slot.is_some() {
@@ -101,7 +112,7 @@ pub fn snapshot() -> (String, Vec<BleDevice>, u32, u32) {
 }
 
 fn stop_requested() -> bool {
-    critical_section::with(|cs| STATE.borrow_ref(cs).status == "stopping")
+    CANCEL.load(Ordering::Acquire)
 }
 
 fn record(report: &AdvReport) {
@@ -167,6 +178,7 @@ pub async fn run(controller: BleController) -> ! {
 }
 
 async fn scan_session(controller: &BleController) {
+    CANCEL.store(false, Ordering::Release);
     set_status("scanning");
     critical_section::with(|cs| {
         let mut state = STATE.borrow_ref_mut(cs);
@@ -187,7 +199,11 @@ async fn scan_session(controller: &BleController) {
         critical_section::with(|cs| STATE.borrow_ref_mut(cs).busy = false);
         return;
     }
-    if controller.exec(&LeSetScanEnable::new(true, true)).await.is_err() {
+    if controller
+        .exec(&LeSetScanEnable::new(true, true))
+        .await
+        .is_err()
+    {
         set_status("scan enable rejected");
         critical_section::with(|cs| STATE.borrow_ref_mut(cs).busy = false);
         return;
@@ -224,6 +240,7 @@ async fn scan_session(controller: &BleController) {
 }
 
 async fn advertise_session(controller: &BleController, campaign: SpamCampaign) {
+    CANCEL.store(false, Ordering::Release);
     set_status(campaign.label());
     critical_section::with(|cs| {
         let mut state = STATE.borrow_ref_mut(cs);
@@ -258,7 +275,11 @@ async fn advertise_session(controller: &BleController, campaign: SpamCampaign) {
         let slice = builder.as_slice();
         let len = slice.len().min(31);
         data[..len].copy_from_slice(&slice[..len]);
-        if controller.exec(&LeSetAdvData::new(len as u8, data)).await.is_err() {
+        if controller
+            .exec(&LeSetAdvData::new(len as u8, data))
+            .await
+            .is_err()
+        {
             set_status("advertising data rejected");
             break;
         }
@@ -270,7 +291,10 @@ async fn advertise_session(controller: &BleController, campaign: SpamCampaign) {
             let mut state = STATE.borrow_ref_mut(cs);
             state.frames = rotator.frames();
         });
-        embassy_time::Timer::after(embassy_time::Duration::from_millis(u64::from(ADV_INTERVAL_MS))).await;
+        embassy_time::Timer::after(embassy_time::Duration::from_millis(u64::from(
+            ADV_INTERVAL_MS,
+        )))
+        .await;
     }
     let _ = controller.exec(&LeSetAdvEnable::new(false)).await;
     critical_section::with(|cs| {

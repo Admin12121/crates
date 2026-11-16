@@ -65,9 +65,13 @@ impl SpamCampaign {
 /// Apple Continuity manufacturer payloads (company id prepended by the builder).
 const APPLE_PAYLOADS: &[&[u8]] = &[
     // Nearby action: "set up new iPhone" style prompt.
-    &[0x0F, 0x05, 0xC1, 0x01, 0x60, 0x4C, 0x95, 0x00, 0x00, 0x10, 0x00, 0x00],
+    &[
+        0x0F, 0x05, 0xC1, 0x01, 0x60, 0x4C, 0x95, 0x00, 0x00, 0x10, 0x00, 0x00,
+    ],
     // Nearby action: accessory setup prompt.
-    &[0x0F, 0x05, 0xC1, 0x07, 0x60, 0x4C, 0x95, 0x00, 0x00, 0x10, 0x00, 0x00],
+    &[
+        0x0F, 0x05, 0xC1, 0x07, 0x60, 0x4C, 0x95, 0x00, 0x00, 0x10, 0x00, 0x00,
+    ],
     // AirPods proximity frame.
     &[
         0x07, 0x19, 0x07, 0x0E, 0x20, 0x75, 0xAA, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12,
@@ -144,8 +148,7 @@ fn samsung_buds_payload(model: u32) -> [u8; 31] {
 /// Galaxy Watch advertisement (preceded by a Flags element).
 fn samsung_watch_payload(model: u8) -> [u8; 15] {
     [
-        0x0E, 0xFF, 0x75, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x01, 0xFF, 0x00, 0x00, 0x43,
-        model,
+        0x0E, 0xFF, 0x75, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x01, 0xFF, 0x00, 0x00, 0x43, model,
     ]
 }
 
@@ -207,8 +210,7 @@ impl SpamRotator {
                 let name = SWIFT_PAIR_NAMES[self.rng.below(SWIFT_PAIR_NAMES.len())];
                 let mut payload = alloc::vec![0x03u8, 0x00, 0x80];
                 payload.extend_from_slice(name);
-                out.flags(0x06)
-                    && out.manufacturer(super::vendor::COMPANY_MICROSOFT, &payload)
+                out.flags(0x06) && out.manufacturer(super::vendor::COMPANY_MICROSOFT, &payload)
             }
             SpamCampaign::IBeacon => {
                 let mut payload = alloc::vec![0x02u8, 0x15];
@@ -237,7 +239,10 @@ mod tests {
         let mut out = alloc::vec::Vec::new();
         for _ in 0..count {
             let mut builder = AdvBuilder::new();
-            assert!(rotator.next_payload(&mut builder), "{campaign:?} payload fits");
+            assert!(
+                rotator.next_payload(&mut builder),
+                "{campaign:?} payload fits"
+            );
             out.push(builder.as_slice().to_vec());
         }
         out
@@ -250,13 +255,7 @@ mod tests {
             for payload in payloads {
                 assert!(!payload.is_empty());
                 assert!(payload.len() <= 31);
-                let report = AdvReport::parse(
-                    BleAddress::new([0x41; 6]),
-                    -40,
-                    &payload,
-                    false,
-                    0,
-                );
+                let report = AdvReport::parse(BleAddress::new([0x41; 6]), -40, &payload, false, 0);
                 let matched = crate::ble::vendor::classify(&report);
                 assert_ne!(
                     matched.kind,
@@ -298,7 +297,10 @@ mod tests {
     fn apple_campaign_rotates_payloads() {
         let payloads = generate(SpamCampaign::Apple, 6);
         let unique: alloc::collections::BTreeSet<&alloc::vec::Vec<u8>> = payloads.iter().collect();
-        assert!(unique.len() >= 3, "Apple campaign rotates through the table");
+        assert!(
+            unique.len() >= 3,
+            "Apple campaign rotates through the table"
+        );
         for payload in &payloads {
             // Flags AD (3 bytes), then manufacturer AD: length, 0xFF, company 0x004C.
             assert_eq!(&payload[0..3], &[0x02, 0x01, 0x06]);

@@ -11,9 +11,7 @@ use alloc::vec::Vec;
 use crate::net::{Channel, MacAddr};
 use crate::util::printable;
 
-use super::frame::{
-    self, FrameHeader, Security, SecurityInfo, subtype,
-};
+use super::frame::{self, FrameHeader, Security, SecurityInfo, subtype};
 
 /// Maximum SSID length in bytes.
 pub const MAX_SSID: usize = 32;
@@ -212,7 +210,9 @@ impl<const N: usize> ApTable<N> {
 
     /// Total APs by security class, for the UI summary line.
     pub fn count_by_security(&self, security: Security) -> usize {
-        self.iter().filter(|r| r.security.security == security).count()
+        self.iter()
+            .filter(|r| r.security.security == security)
+            .count()
     }
 
     /// Number of APs advertising WPS.
@@ -331,12 +331,7 @@ impl<const N: usize> StationTable<N> {
         if mac.is_broadcast() || mac == MacAddr::ZERO {
             return;
         }
-        if let Some(record) = self
-            .records
-            .iter_mut()
-            .flatten()
-            .find(|r| r.mac == mac)
-        {
+        if let Some(record) = self.records.iter_mut().flatten().find(|r| r.mac == mac) {
             record.frames = record.frames.saturating_add(1);
             record.last_seen_ms = now_ms;
             record.rssi = rssi;
@@ -383,13 +378,31 @@ impl<const N: usize> StationTable<N> {
 /// What the scan engine learned from one frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Observation {
-    Beacon { bssid: MacAddr },
-    ProbeResponse { bssid: MacAddr },
-    ProbeRequest { client: MacAddr },
-    Deauth { source: MacAddr, destination: MacAddr },
-    Disassoc { source: MacAddr, destination: MacAddr },
-    Data { source: MacAddr, destination: MacAddr },
-    Eapol { source: MacAddr, destination: MacAddr },
+    Beacon {
+        bssid: MacAddr,
+    },
+    ProbeResponse {
+        bssid: MacAddr,
+    },
+    ProbeRequest {
+        client: MacAddr,
+    },
+    Deauth {
+        source: MacAddr,
+        destination: MacAddr,
+    },
+    Disassoc {
+        source: MacAddr,
+        destination: MacAddr,
+    },
+    Data {
+        source: MacAddr,
+        destination: MacAddr,
+    },
+    Eapol {
+        source: MacAddr,
+        destination: MacAddr,
+    },
     Other,
     Malformed,
 }
@@ -524,7 +537,8 @@ impl<const A: usize, const S: usize> ScanEngine<A, S> {
                     // unprotected with the EAPOL ethertype 0x888E.
                     if is_eapol_frame(header.body) {
                         self.eapol = self.eapol.saturating_add(1);
-                        self.stations.observe(client, Some(bssid), channel, rssi, now_ms);
+                        self.stations
+                            .observe(client, Some(bssid), channel, rssi, now_ms);
                         self.aps.note_data(bssid);
                         return Observation::Eapol {
                             source: client,
@@ -560,7 +574,9 @@ impl<const A: usize, const S: usize> ScanEngine<A, S> {
 /// Detect an EAPOL payload inside a data frame body (SNAP + 0x888E ethertype).
 pub fn is_eapol_frame(body: &[u8]) -> bool {
     // 802.11 data body starts with LLC/SNAP: AA AA 03 00 00 00 <ethertype>
-    body.len() >= 8 && body[..6] == [0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00] && body[6..8] == [0x88, 0x8E]
+    body.len() >= 8
+        && body[..6] == [0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00]
+        && body[6..8] == [0x88, 0x8E]
 }
 
 /// Extract the EAPOL payload from a data frame body.
@@ -641,7 +657,7 @@ impl ChannelHopper {
 mod tests {
     use super::*;
     use crate::wifi::frame::tests_support::beacon_frame_bytes;
-    use crate::wifi::frame::{beacon_frame, BeaconOptions};
+    use crate::wifi::frame::{BeaconOptions, beacon_frame};
 
     fn engine() -> ScanEngine<32, 64> {
         ScanEngine::new()
@@ -706,7 +722,12 @@ mod tests {
             hidden: true,
             ..Default::default()
         };
-        engine.on_frame(beacon_frame(b"Named", bssid, &hidden).as_slice(), -50, 1, 10);
+        engine.on_frame(
+            beacon_frame(b"Named", bssid, &hidden).as_slice(),
+            -50,
+            1,
+            10,
+        );
         assert_eq!(engine.aps.get(bssid).unwrap().ssid.display(), "Named");
     }
 
@@ -761,7 +782,10 @@ mod tests {
     #[test]
     fn malformed_frames_are_counted_not_fatal() {
         let mut engine = engine();
-        assert_eq!(engine.on_frame(&[0x80, 0x00], 0, 1, 0), Observation::Malformed);
+        assert_eq!(
+            engine.on_frame(&[0x80, 0x00], 0, 1, 0),
+            Observation::Malformed
+        );
         assert_eq!(engine.malformed, 1);
         assert!(engine.aps.is_empty());
     }

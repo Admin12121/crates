@@ -283,9 +283,7 @@ pub fn elements(body: &[u8]) -> IeIter<'_> {
 
 /// SSID of a beacon/probe response/association body.
 pub fn find_ssid(body: &[u8]) -> Option<&[u8]> {
-    elements(body)
-        .find(|e| e.id == ie::SSID)
-        .map(|e| e.body)
+    elements(body).find(|e| e.id == ie::SSID).map(|e| e.body)
 }
 
 /// Primary channel from the DS parameter set (beacons/probe responses).
@@ -297,9 +295,7 @@ pub fn find_channel(body: &[u8]) -> Option<u8> {
 
 /// RSN information element body.
 pub fn find_rsn(body: &[u8]) -> Option<&[u8]> {
-    IeIter::new(body)
-        .find(|e| e.id == ie::RSN)
-        .map(|e| e.body)
+    IeIter::new(body).find(|e| e.id == ie::RSN).map(|e| e.body)
 }
 
 /// WPA1 vendor element (Microsoft OUI, type 1).
@@ -311,8 +307,7 @@ pub fn find_wpa(body: &[u8]) -> Option<&[u8]> {
 
 /// True when a WPS element is present.
 pub fn has_wps(body: &[u8]) -> bool {
-    IeIter::new(body)
-        .any(|e| e.id == ie::VENDOR && e.vendor_type() == Some(4))
+    IeIter::new(body).any(|e| e.id == ie::VENDOR && e.vendor_type() == Some(4))
 }
 
 /// WPS version/state summary from the WPS vendor IE.
@@ -326,8 +321,7 @@ pub struct WpsInfo {
 
 /// Parse the attributes of a WPS IE body (after the 4-byte OUI/type prefix).
 pub fn parse_wps(body: &[u8]) -> Option<WpsInfo> {
-    let ie = IeIter::new(body)
-        .find(|e| e.id == ie::VENDOR && e.vendor_type() == Some(4))?;
+    let ie = IeIter::new(body).find(|e| e.id == ie::VENDOR && e.vendor_type() == Some(4))?;
     let attrs = ie.body.get(4..)?;
     let mut info = WpsInfo {
         version: 0,
@@ -586,11 +580,7 @@ pub mod reason {
 }
 
 /// Build a deauthentication frame (26 bytes).
-pub fn deauth_frame(
-    destination: MacAddr,
-    bssid: MacAddr,
-    reason_code: u16,
-) -> FrameBuffer {
+pub fn deauth_frame(destination: MacAddr, bssid: MacAddr, reason_code: u16) -> FrameBuffer {
     let mut frame = FrameBuffer::new();
     frame.begin_mgmt(subtype::DEAUTH, destination, bssid, bssid);
     frame.push_u16_le(reason_code);
@@ -613,7 +603,12 @@ pub fn broadcast_deauth(bssid: MacAddr, reason_code: u16) -> FrameBuffer {
 /// Build a probe request, optionally directed at one SSID.
 pub fn probe_request(source: MacAddr, ssid: Option<&[u8]>) -> FrameBuffer {
     let mut frame = FrameBuffer::new();
-    frame.begin_mgmt(subtype::PROBE_REQ, MacAddr::BROADCAST, source, MacAddr::BROADCAST);
+    frame.begin_mgmt(
+        subtype::PROBE_REQ,
+        MacAddr::BROADCAST,
+        source,
+        MacAddr::BROADCAST,
+    );
     frame.push_element(ie::SSID, ssid.unwrap_or(&[]));
     frame.push_element(ie::SUPPORTED_RATES, &DEFAULT_RATES[..4]);
     frame
@@ -774,7 +769,7 @@ pub mod tests_support {
 
 #[cfg(test)]
 mod tests {
-        use super::tests_support::beacon_frame_bytes;
+    use super::tests_support::beacon_frame_bytes;
     use super::*;
 
     #[test]
@@ -918,7 +913,12 @@ mod tests {
     fn wps_element_detection() {
         // Beacon with a WPS vendor IE advertising version 1.0, configured, WPA2 PSK.
         let mut frame = FrameBuffer::new();
-        frame.begin_mgmt(subtype::BEACON, MacAddr::BROADCAST, MacAddr::BROADCAST, MacAddr::BROADCAST);
+        frame.begin_mgmt(
+            subtype::BEACON,
+            MacAddr::BROADCAST,
+            MacAddr::BROADCAST,
+            MacAddr::BROADCAST,
+        );
         frame.push(&[0u8; 12]);
         frame.push_element(ie::SSID, b"WPSNet");
         frame.push_element(
@@ -943,7 +943,12 @@ mod tests {
     #[test]
     fn security_classification_covers_wpa3_and_open() {
         let mut frame = FrameBuffer::new();
-        frame.begin_mgmt(subtype::BEACON, MacAddr::BROADCAST, MacAddr::BROADCAST, MacAddr::BROADCAST);
+        frame.begin_mgmt(
+            subtype::BEACON,
+            MacAddr::BROADCAST,
+            MacAddr::BROADCAST,
+            MacAddr::BROADCAST,
+        );
         frame.push(&[0u8; 12]);
         // RSN with SAE-only AKM (type 8).
         let mut rsn = RSN_PSK_CCMP;
@@ -957,11 +962,19 @@ mod tests {
         );
 
         let mut open = FrameBuffer::new();
-        open.begin_mgmt(subtype::BEACON, MacAddr::BROADCAST, MacAddr::BROADCAST, MacAddr::BROADCAST);
+        open.begin_mgmt(
+            subtype::BEACON,
+            MacAddr::BROADCAST,
+            MacAddr::BROADCAST,
+            MacAddr::BROADCAST,
+        );
         open.push(&[0u8; 12]);
         let bytes = open.as_slice().to_vec();
         let header = FrameHeader::parse(&bytes).unwrap();
-        assert_eq!(classify_security(header.body, false).security, Security::Open);
+        assert_eq!(
+            classify_security(header.body, false).security,
+            Security::Open
+        );
         assert_eq!(classify_security(header.body, true).security, Security::Wep);
     }
 }

@@ -285,10 +285,10 @@ pub fn validate(plan: &[RegisterWrite]) -> Result<(), &'static str> {
         match write.register {
             REG_RF_CH if write.value > MAX_CHANNEL => return Err("RF channel out of range"),
             REG_SETUP_AW if !(0x01..=0x03).contains(&write.value) => {
-                return Err("address width must be 3..5 bytes")
+                return Err("address width must be 3..5 bytes");
             }
             REG_RX_PW_P0..=REG_RX_PW_P5 if write.value == 0 || write.value > MAX_PAYLOAD => {
-                return Err("payload width must be 1..32 bytes")
+                return Err("payload width must be 1..32 bytes");
             }
             _ => {}
         }
@@ -334,7 +334,10 @@ mod tests {
         let plan = configuration(Nrf24Mode::SpectrumSweep, 40, DataRate::Mbps1);
         validate(&plan).unwrap();
         assert_eq!(
-            plan.iter().find(|w| w.register == REG_CONFIG).unwrap().value,
+            plan.iter()
+                .find(|w| w.register == REG_CONFIG)
+                .unwrap()
+                .value,
             CONFIG_PWR_UP
         );
         assert_eq!(
@@ -342,7 +345,10 @@ mod tests {
             0
         );
         assert_eq!(
-            plan.iter().find(|w| w.register == REG_EN_RXADDR).unwrap().value,
+            plan.iter()
+                .find(|w| w.register == REG_EN_RXADDR)
+                .unwrap()
+                .value,
             0x3F
         );
         assert_eq!(
@@ -361,11 +367,17 @@ mod tests {
     fn capture_plan_enables_crc() {
         let plan = configuration(Nrf24Mode::PacketCapture, 76, DataRate::Mbps2);
         assert_eq!(
-            plan.iter().find(|w| w.register == REG_CONFIG).unwrap().value,
+            plan.iter()
+                .find(|w| w.register == REG_CONFIG)
+                .unwrap()
+                .value,
             CONFIG_EN_CRC | CONFIG_CRCO | CONFIG_PWR_UP
         );
         assert_eq!(
-            plan.iter().find(|w| w.register == REG_RF_SETUP).unwrap().value,
+            plan.iter()
+                .find(|w| w.register == REG_RF_SETUP)
+                .unwrap()
+                .value,
             DataRate::Mbps2.rf_setup_bits()
         );
         validate(&plan).unwrap();
@@ -379,7 +391,10 @@ mod tests {
             0x01
         );
         assert_eq!(
-            plan.iter().find(|w| w.register == REG_SETUP_RETR).unwrap().value,
+            plan.iter()
+                .find(|w| w.register == REG_SETUP_RETR)
+                .unwrap()
+                .value,
             0x1F
         );
         validate(&plan).unwrap();
@@ -387,21 +402,27 @@ mod tests {
 
     #[test]
     fn validation_rejects_impossible_values() {
-        assert!(validate(&[RegisterWrite {
-            register: REG_RF_CH,
-            value: 200
-        }])
-        .is_err());
-        assert!(validate(&[RegisterWrite {
-            register: REG_SETUP_AW,
-            value: 0
-        }])
-        .is_err());
-        assert!(validate(&[RegisterWrite {
-            register: REG_RX_PW_P0,
-            value: 0
-        }])
-        .is_err());
+        assert!(
+            validate(&[RegisterWrite {
+                register: REG_RF_CH,
+                value: 200
+            }])
+            .is_err()
+        );
+        assert!(
+            validate(&[RegisterWrite {
+                register: REG_SETUP_AW,
+                value: 0
+            }])
+            .is_err()
+        );
+        assert!(
+            validate(&[RegisterWrite {
+                register: REG_RX_PW_P0,
+                value: 0
+            }])
+            .is_err()
+        );
         // Channel is clamped when building a plan.
         let plan = configuration(Nrf24Mode::SpectrumSweep, 250, DataRate::Mbps1);
         assert_eq!(

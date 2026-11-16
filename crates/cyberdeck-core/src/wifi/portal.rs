@@ -615,8 +615,10 @@ mod tests {
     #[test]
     fn captures_posted_credentials() {
         let body = b"email=lab%40example.com&password=p%40ss+word&submit=Continue";
-        let mut raw = String::from("POST /submit HTTP/1.1\r\nHost: 192.168.4.1\r\n\
-            Content-Type: application/x-www-form-urlencoded\r\nContent-Length: ");
+        let mut raw = String::from(
+            "POST /submit HTTP/1.1\r\nHost: 192.168.4.1\r\n\
+            Content-Type: application/x-www-form-urlencoded\r\nContent-Length: ",
+        );
         raw.push_str(&body.len().to_string());
         raw.push_str("\r\n\r\n");
         let mut bytes = raw.into_bytes();
@@ -677,7 +679,10 @@ mod tests {
         assert_eq!(u16::from_be_bytes([response[6], response[7]]), 1, "ANCOUNT");
         assert_eq!(&response[response.len() - 4..], &[192, 168, 4, 1]);
         // Question is echoed verbatim.
-        assert_eq!(&response[12..12 + query.len() - 12 - 4], &query[12..query.len() - 4]);
+        assert_eq!(
+            &response[12..12 + query.len() - 12 - 4],
+            &query[12..query.len() - 4]
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ use crate::util::{hex_encode, read_u16_be};
 
 use super::ap::Ssid;
 use super::crypto::{
-    compute_mic, derive_pmkid, derive_ptk, mic_matches, derive_pmk, PairwiseKeys, PMKID_LEN,
+    PMKID_LEN, PairwiseKeys, compute_mic, derive_pmk, derive_pmkid, derive_ptk, mic_matches,
 };
 
 /// Offset of the MIC field inside an EAPOL-Key frame.
@@ -284,8 +284,13 @@ impl Handshake {
             return Verification::NeedMoreData;
         }
         let pmk = derive_pmk(passphrase, self.ssid.as_bytes());
-        let keys: PairwiseKeys =
-            derive_ptk(&pmk, self.ap.as_bytes(), self.client.as_bytes(), &self.anonce, &self.snonce);
+        let keys: PairwiseKeys = derive_ptk(
+            &pmk,
+            self.ap.as_bytes(),
+            self.client.as_bytes(),
+            &self.anonce,
+            &self.snonce,
+        );
         let mut frame = self.eapol.clone();
         if frame.len() < MIC_OFFSET + 16 {
             return Verification::NeedMoreData;
@@ -395,7 +400,9 @@ impl<const N: usize> HandshakeStore<N> {
 
     /// Number of captures with a usable MIC (crackable/verifiable).
     pub fn complete_count(&self) -> usize {
-        self.iter().filter(|h| h.quality() == HandshakeQuality::Complete).count()
+        self.iter()
+            .filter(|h| h.quality() == HandshakeQuality::Complete)
+            .count()
     }
 
     pub fn pmkid_count(&self) -> usize {
@@ -421,11 +428,10 @@ impl<const N: usize> HandshakeStore<N> {
         }
         self.eapol_frames = self.eapol_frames.saturating_add(1);
 
-        let idx = match self
-            .entries
-            .iter()
-            .position(|slot| slot.as_ref().is_some_and(|h| h.ap == ap && h.client == client))
-        {
+        let idx = match self.entries.iter().position(|slot| {
+            slot.as_ref()
+                .is_some_and(|h| h.ap == ap && h.client == client)
+        }) {
             Some(idx) => idx,
             None => {
                 let idx = match self.entries.iter().position(|slot| slot.is_none()) {
@@ -555,13 +561,7 @@ mod tests {
 
     /// Build a properly signed message 2 for the known passphrase.
     fn signed_message2() -> Vec<u8> {
-        let mut frame = build_eapol_key(
-            DESCRIPTOR_RSN,
-            KEY_INFO_MIC | 0x0002,
-            1,
-            &snonce(),
-            &[],
-        );
+        let mut frame = build_eapol_key(DESCRIPTOR_RSN, KEY_INFO_MIC | 0x0002, 1, &snonce(), &[]);
         let pmk = derive_pmk(PASS, SSID);
         let keys = derive_ptk(&pmk, &AP.0, &CLIENT.0, &anonce(), &snonce());
         let mic = compute_mic(&keys.kck, &frame);
@@ -572,10 +572,16 @@ mod tests {
     #[test]
     fn classifies_all_four_messages() {
         let m1 = build_eapol_key(DESCRIPTOR_RSN, KEY_INFO_ACK, 1, &anonce(), &[]);
-        assert_eq!(EapolKey::parse(&m1).unwrap().message, HandshakeMessage::Message1);
+        assert_eq!(
+            EapolKey::parse(&m1).unwrap().message,
+            HandshakeMessage::Message1
+        );
 
         let m2 = build_eapol_key(DESCRIPTOR_RSN, KEY_INFO_MIC, 1, &snonce(), &[]);
-        assert_eq!(EapolKey::parse(&m2).unwrap().message, HandshakeMessage::Message2);
+        assert_eq!(
+            EapolKey::parse(&m2).unwrap().message,
+            HandshakeMessage::Message2
+        );
 
         let m3 = build_eapol_key(
             DESCRIPTOR_RSN,
@@ -584,10 +590,22 @@ mod tests {
             &anonce(),
             &[0u8; 16],
         );
-        assert_eq!(EapolKey::parse(&m3).unwrap().message, HandshakeMessage::Message3);
+        assert_eq!(
+            EapolKey::parse(&m3).unwrap().message,
+            HandshakeMessage::Message3
+        );
 
-        let m4 = build_eapol_key(DESCRIPTOR_RSN, KEY_INFO_MIC | KEY_INFO_SECURE, 2, &[0u8; 32], &[]);
-        assert_eq!(EapolKey::parse(&m4).unwrap().message, HandshakeMessage::Message4);
+        let m4 = build_eapol_key(
+            DESCRIPTOR_RSN,
+            KEY_INFO_MIC | KEY_INFO_SECURE,
+            2,
+            &[0u8; 32],
+            &[],
+        );
+        assert_eq!(
+            EapolKey::parse(&m4).unwrap().message,
+            HandshakeMessage::Message4
+        );
     }
 
     #[test]
@@ -674,7 +692,10 @@ mod tests {
         store.on_eapol(&m2, AP, CLIENT, Some(SSID), 6, 1);
         let handshake = store.get(AP, CLIENT).unwrap();
         assert_eq!(handshake.quality(), HandshakeQuality::PartialClient);
-        assert_eq!(handshake.verify_passphrase(PASS), Verification::NeedMoreData);
+        assert_eq!(
+            handshake.verify_passphrase(PASS),
+            Verification::NeedMoreData
+        );
         assert!(handshake.hc22000().is_none());
     }
 

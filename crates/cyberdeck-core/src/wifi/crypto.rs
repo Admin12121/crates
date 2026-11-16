@@ -311,7 +311,9 @@ mod tests {
             "A9993E364706816ABA3E25717850C26C9CD0D89D"
         );
         assert_eq!(
-            hex_encode(&sha1(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
+            hex_encode(&sha1(
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+            )),
             "84983E441C3BD26EBAAE4AA1F95129E5E54670F1"
         );
         // Long input exercises multi-block streaming.
@@ -336,7 +338,10 @@ mod tests {
         // Key longer than the block size must be hashed first.
         let long_key = [0xAAu8; 80];
         assert_eq!(
-            hex_encode(&hmac_sha1(&long_key, b"Test Using Larger Than Block-Size Key - Hash Key First")),
+            hex_encode(&hmac_sha1(
+                &long_key,
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            )),
             "AA4AE5E15272D00E95705637CE8A3B55ED402112"
         );
     }
@@ -352,7 +357,12 @@ mod tests {
         assert_eq!(hex_encode(&out), "4B007901B765489ABEAD49D926F721D065A429C1");
         // 32-byte expansion used by the WPA PMK spans two PBKDF2 blocks.
         let mut pmk = [0u8; 32];
-        pbkdf2_hmac_sha1(b"passwordPASSWORDpassword", b"saltSALTsaltSALTsaltSALTsaltSALTsalt", 4096, &mut pmk);
+        pbkdf2_hmac_sha1(
+            b"passwordPASSWORDpassword",
+            b"saltSALTsaltSALTsaltSALTsaltSALTsalt",
+            4096,
+            &mut pmk,
+        );
         assert_eq!(
             hex_encode(&pmk[..25]),
             "3D2EEC4FE41C849B80C8D83662C0E44A8B291A964CF2F07038"
@@ -415,6 +425,9 @@ mod tests {
             &anonce,
             &snonce,
         );
-        assert!(!mic_matches(&compute_mic(&wrong.kck, &frame[..frame.len() - 16]), &frame[mic_region..]));
+        assert!(!mic_matches(
+            &compute_mic(&wrong.kck, &frame[..frame.len() - 16]),
+            &frame[mic_region..]
+        ));
     }
 }

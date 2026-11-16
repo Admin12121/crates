@@ -96,12 +96,21 @@ pub struct BoardProfile {
     pub input: InputPins,
     pub sd: SpiPins,
     pub nrf24: Option<Nrf24Pins>,
-    pub battery_adc: Option<u8>,
+    pub battery: Option<BatteryPins>,
     /// Classes this profile can support at all.
     pub supported: &'static [DeviceClass],
     /// Classes that are enhancements only.
     pub optional: &'static [DeviceClass],
     pub coex: CoexPolicy,
+}
+
+/// Battery sense wiring: the ADC pin plus the resistor-divider ratio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatteryPins {
+    /// GPIO number fed by the divider.
+    pub pin: u8,
+    /// Pack voltage divided by pin voltage, e.g. `2` for a 1:2 divider.
+    pub divider: u16,
 }
 
 /// Stable identifiers for build-time board selection.
@@ -157,7 +166,7 @@ pub const CORE_PROFILE: BoardProfile = BoardProfile {
         cs: 42,
     },
     nrf24: None,
-    battery_adc: Some(8),
+    battery: Some(BatteryPins { pin: 8, divider: 2 }),
     supported: &[
         DeviceClass::WifiRadio,
         DeviceClass::BleRadio,
@@ -203,7 +212,10 @@ pub const PROFILES: &[BoardProfile] = &[CORE_PROFILE, FIELD_PROFILE];
 
 /// Look up a profile by id.
 pub fn profile(id: BoardId) -> &'static BoardProfile {
-    PROFILES.iter().find(|p| p.id == id).unwrap_or(&CORE_PROFILE)
+    PROFILES
+        .iter()
+        .find(|p| p.id == id)
+        .unwrap_or(&CORE_PROFILE)
 }
 
 /// Default profile for callers that have no build-time selection (host tests).
@@ -214,7 +226,10 @@ pub fn active_profile() -> &'static BoardProfile {
 
 /// The plan-mandated entry point: capabilities *possible* for a board profile.
 pub fn capabilities_for_board(id: BoardId) -> CapabilitySet {
-    let profile = PROFILES.iter().find(|p| p.id == id).unwrap_or(&CORE_PROFILE);
+    let profile = PROFILES
+        .iter()
+        .find(|p| p.id == id)
+        .unwrap_or(&CORE_PROFILE);
     CapabilitySet {
         supported: profile.supported,
     }
@@ -313,8 +328,9 @@ mod tests {
             if let Some(nrf) = profile.nrf24 {
                 pins.extend([nrf.ce, nrf.csn]);
             }
-            if let Some(adc) = profile.battery_adc {
-                pins.push(adc);
+            if let Some(battery) = profile.battery {
+                pins.push(battery.pin);
+                assert!(battery.divider >= 1, "divider ratio must be at least 1");
             }
             for pin in pins {
                 assert!(!matches!(pin, 0 | 3 | 45 | 46), "strapping pin {pin}");

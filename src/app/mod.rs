@@ -8,9 +8,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use cyberdeck_core::hardware::{DeviceClass, PeripheralRegistry};
-use cyberdeck_core::ui::menu::{ItemStatus, MenuItem, MenuList};
-use cyberdeck_core::ui::{theme, Canvas, Rect};
 use cyberdeck_core::ui::font;
+use cyberdeck_core::ui::menu::{ItemStatus, MenuItem, MenuList};
+use cyberdeck_core::ui::{Canvas, Rect, theme};
 
 use crate::platform::ble::BleDevice;
 use crate::platform::wifi::ApRow;
@@ -161,7 +161,11 @@ impl App {
             live: Live::default(),
             needs_render: true,
         };
-        app.home = MenuList::new("CYBERDECK", Self::home_items(&app.registry), ROWS_PER_SCREEN);
+        app.home = MenuList::new(
+            "CYBERDECK",
+            Self::home_items(&app.registry),
+            ROWS_PER_SCREEN,
+        );
         app
     }
 
@@ -175,7 +179,7 @@ impl App {
             (Group::Rf, "nRF24 RF"),
         ] {
             let status = if registry.is_ready(group.device()) {
-                ItemStatus::Ready
+                ItemStatus::Implemented
             } else {
                 ItemStatus::RequiresHardware {
                     device: group.device().label(),
@@ -199,10 +203,22 @@ impl App {
                 (Tool::WifiBeacon, "Beacon Spam"),
                 (Tool::WifiDeauth, "Deauth Test"),
             ],
-            Group::Packet => &[(Tool::PktCapture, "Live Capture"), (Tool::PktAnalyse, "Frame Inspector")],
-            Group::Ble => &[(Tool::BleScan, "BLE Scan"), (Tool::BleSpam, "Advertising Tests")],
-            Group::UsbHid => &[(Tool::HidIntro, "HID Device"), (Tool::HidDucky, "DuckyScript")],
-            Group::Rf => &[(Tool::RfSpectrum, "Channel Monitor"), (Tool::RfCapture, "Packet Capture")],
+            Group::Packet => &[
+                (Tool::PktCapture, "Live Capture"),
+                (Tool::PktAnalyse, "Frame Inspector"),
+            ],
+            Group::Ble => &[
+                (Tool::BleScan, "BLE Scan"),
+                (Tool::BleSpam, "Advertising Tests"),
+            ],
+            Group::UsbHid => &[
+                (Tool::HidIntro, "HID Device"),
+                (Tool::HidDucky, "DuckyScript"),
+            ],
+            Group::Rf => &[
+                (Tool::RfSpectrum, "Channel Monitor"),
+                (Tool::RfCapture, "Packet Capture"),
+            ],
         };
         let ready = registry.is_ready(group.device());
         tools
@@ -213,7 +229,7 @@ impl App {
                         device: group.device().label(),
                     }
                 } else if tool.is_wired() {
-                    ItemStatus::Ready
+                    ItemStatus::Implemented
                 } else {
                     ItemStatus::ComingSoon
                 };
@@ -230,6 +246,14 @@ impl App {
     pub fn set_live(&mut self, live: Live) {
         self.live = live;
         self.needs_render = true;
+    }
+
+    pub fn message(&self) -> Option<String> {
+        self.live.message.clone()
+    }
+
+    pub fn clear_message(&mut self) {
+        self.live.message = None;
     }
 
     pub fn set_message(&mut self, message: &str) {
@@ -254,29 +278,29 @@ impl App {
         match &self.screen {
             Screen::Home => {
                 match button {
-                Button::Down => self.home.next(),
-                Button::Up => self.home.previous(),
-                Button::Select => {
-                    let index = self.home.selected();
-                    if index < 5 {
-                        let group = [
-                            Group::Wifi,
-                            Group::Packet,
-                            Group::Ble,
-                            Group::UsbHid,
-                            Group::Rf,
-                        ][index];
-                        self.group = Some(MenuList::new(
-                            group.title(),
-                            Self::group_items(group, &self.registry),
-                            ROWS_PER_SCREEN,
-                        ));
-                        self.screen = Screen::Group(group);
-                    } else {
-                        self.screen = Screen::Diagnostics;
+                    Button::Down => self.home.next(),
+                    Button::Up => self.home.previous(),
+                    Button::Select => {
+                        let index = self.home.selected();
+                        if index < 5 {
+                            let group = [
+                                Group::Wifi,
+                                Group::Packet,
+                                Group::Ble,
+                                Group::UsbHid,
+                                Group::Rf,
+                            ][index];
+                            self.group = Some(MenuList::new(
+                                group.title(),
+                                Self::group_items(group, &self.registry),
+                                ROWS_PER_SCREEN,
+                            ));
+                            self.screen = Screen::Group(group);
+                        } else {
+                            self.screen = Screen::Diagnostics;
+                        }
                     }
-                }
-                Button::Back | Button::Home => {}
+                    Button::Back | Button::Home => {}
                 }
                 Action::None
             }
@@ -348,7 +372,10 @@ impl App {
     }
 
     pub fn render(&self, canvas: &mut impl Canvas) {
-        canvas.fill_rect(Rect::new(0, 0, canvas.width(), canvas.height()), theme::BACKGROUND);
+        canvas.fill_rect(
+            Rect::new(0, 0, canvas.width(), canvas.height()),
+            theme::BACKGROUND,
+        );
         let title = match &self.screen {
             Screen::Home => "CYBERDECK",
             Screen::Group(group) => group.title(),
@@ -385,6 +412,7 @@ impl App {
             }
             let colour = match item.status {
                 ItemStatus::Ready => theme::TEXT,
+                ItemStatus::Implemented => theme::ACCENT,
                 ItemStatus::Running => theme::ACCENT,
                 ItemStatus::RequiresHardware { .. } => theme::WARNING,
                 ItemStatus::ComingSoon => theme::TEXT_DIM,
@@ -395,7 +423,11 @@ impl App {
                 y + 4,
                 &line,
                 colour,
-                if selected { theme::SELECTION } else { theme::BACKGROUND },
+                if selected {
+                    theme::SELECTION
+                } else {
+                    theme::BACKGROUND
+                },
                 1,
             );
         }
@@ -473,7 +505,14 @@ impl App {
             y += 12;
         }
         if let Some(message) = &self.live.message {
-            canvas.draw_text(4, canvas.height() as i16 - 30, message, theme::WARNING, theme::BACKGROUND, 1);
+            canvas.draw_text(
+                4,
+                canvas.height() as i16 - 30,
+                message,
+                theme::WARNING,
+                theme::BACKGROUND,
+                1,
+            );
         }
     }
 

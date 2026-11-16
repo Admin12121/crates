@@ -69,10 +69,7 @@ impl Spectrum {
     }
 
     pub fn level(&self, channel: u8) -> u8 {
-        self.levels
-            .get(channel as usize)
-            .copied()
-            .unwrap_or(0)
+        self.levels.get(channel as usize).copied().unwrap_or(0)
     }
 
     pub fn peak_level(&self, channel: u8) -> u8 {
@@ -157,7 +154,11 @@ impl Spectrum {
     /// Activity percentage at a channel, for the status readout.
     pub fn readout(&self) -> (u8, u16, u8) {
         let channel = self.peak_channel().unwrap_or(0);
-        (channel, super::nrf24::frequency_mhz(channel), self.percent(channel))
+        (
+            channel,
+            super::nrf24::frequency_mhz(channel),
+            self.percent(channel),
+        )
     }
 
     pub fn clear(&mut self) {

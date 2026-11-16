@@ -295,7 +295,8 @@ mod tests {
 
     #[test]
     fn records_carry_timestamps_lengths_and_radiotap() {
-        let mut writer = PcapWriter::new(VecSink::default(), SNAPLEN_DEFAULT, true, 1 << 20).unwrap();
+        let mut writer =
+            PcapWriter::new(VecSink::default(), SNAPLEN_DEFAULT, true, 1 << 20).unwrap();
         // Minimal 26-byte deauthentication frame.
         let frame = [
             0xC0, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x11, 0x22, 0x33,
@@ -307,8 +308,14 @@ mod tests {
         let (sink, stats) = writer.finish().unwrap();
         assert_eq!(stats.records, 1);
         let record = &sink.0[24..];
-        assert_eq!(u32::from_le_bytes(record[0..4].try_into().unwrap()), 1_700_000_000);
-        assert_eq!(u32::from_le_bytes(record[4..8].try_into().unwrap()), 123_456);
+        assert_eq!(
+            u32::from_le_bytes(record[0..4].try_into().unwrap()),
+            1_700_000_000
+        );
+        assert_eq!(
+            u32::from_le_bytes(record[4..8].try_into().unwrap()),
+            123_456
+        );
         let incl = u32::from_le_bytes(record[8..12].try_into().unwrap()) as usize;
         let orig = u32::from_le_bytes(record[12..16].try_into().unwrap()) as usize;
         assert_eq!(incl, Radiotap::LEN + frame.len());

@@ -5,8 +5,8 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use cyberdeck_core::hardware::{DeviceClass, DeviceState, PeripheralRegistry};
 use cyberdeck_core::board::BoardProfile;
+use cyberdeck_core::hardware::{DeviceClass, DeviceState, PeripheralRegistry};
 
 /// Result of the boot probe, including one human-readable line per device.
 pub struct ProbeReport {
@@ -22,11 +22,7 @@ impl ProbeReport {
         }
     }
 
-    pub fn record(
-        &mut self,
-        class: DeviceClass,
-        result: Result<Option<String>, &'static str>,
-    ) {
+    pub fn record(&mut self, class: DeviceClass, result: Result<Option<String>, &'static str>) {
         match result {
             Ok(detail) => {
                 self.registry

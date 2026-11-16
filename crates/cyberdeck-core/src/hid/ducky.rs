@@ -27,15 +27,30 @@ pub const MAX_SCRIPT_BYTES: usize = 32 * 1024;
 pub enum Command {
     Delay(u32),
     /// Text to type; `enter` appends a newline after the text.
-    Text { text: Vec<u8>, enter: bool },
+    Text {
+        text: Vec<u8>,
+        enter: bool,
+    },
     /// Press and release a key with modifiers.
-    Key { modifiers: u8, keycode: u8 },
+    Key {
+        modifiers: u8,
+        keycode: u8,
+    },
     /// Hold a key down (released by `HOLD` release or at script end).
-    KeyDown { modifiers: u8, keycode: u8 },
-    KeyUp { modifiers: u8, keycode: u8 },
+    KeyDown {
+        modifiers: u8,
+        keycode: u8,
+    },
+    KeyUp {
+        modifiers: u8,
+        keycode: u8,
+    },
     /// Consumer-control usage.
     Media(u16),
-    MouseMove { dx: i8, dy: i8 },
+    MouseMove {
+        dx: i8,
+        dy: i8,
+    },
     MouseClick(u8),
     MouseScroll(i8),
     /// Repeat the previous command `n` times.
@@ -112,9 +127,7 @@ impl Script {
         for command in &self.commands {
             total += match command {
                 Command::Delay(ms) => u64::from(*ms),
-                Command::Text { text, .. } => {
-                    text.len() as u64 * u64::from(self.key_delay_ms)
-                }
+                Command::Text { text, .. } => text.len() as u64 * u64::from(self.key_delay_ms),
                 Command::Repeat(times) => u64::from(*times) * 20,
                 _ => u64::from(self.key_delay_ms),
             };
@@ -139,7 +152,10 @@ pub fn parse(name: &str, source: &str) -> Result<Script, ParseError> {
             continue;
         }
         if commands.len() >= MAX_COMMANDS {
-            return Err(ParseError::new(line_no, "script has more than 2048 commands"));
+            return Err(ParseError::new(
+                line_no,
+                "script has more than 2048 commands",
+            ));
         }
 
         let (head, tail) = split_command(line);
@@ -147,12 +163,13 @@ pub fn parse(name: &str, source: &str) -> Result<Script, ParseError> {
 
         let command = match upper.as_str() {
             "DELAY" => {
-                let ms = parse_u32(tail).ok_or(ParseError::new(line_no, "DELAY needs milliseconds"))?;
+                let ms =
+                    parse_u32(tail).ok_or(ParseError::new(line_no, "DELAY needs milliseconds"))?;
                 Command::Delay(ms.min(600_000))
             }
             "DEFAULT_DELAY" | "DEFAULTDELAY" => {
-                let ms =
-                    parse_u32(tail).ok_or(ParseError::new(line_no, "DEFAULT_DELAY needs milliseconds"))?;
+                let ms = parse_u32(tail)
+                    .ok_or(ParseError::new(line_no, "DEFAULT_DELAY needs milliseconds"))?;
                 default_delay_ms = ms.min(10_000) as u16;
                 Command::SetDefaultDelay(default_delay_ms)
             }
@@ -175,7 +192,8 @@ pub fn parse(name: &str, source: &str) -> Result<Script, ParseError> {
                 }
             }
             "REPEAT" => {
-                let times = parse_u32(tail).ok_or(ParseError::new(line_no, "REPEAT needs a count"))?;
+                let times =
+                    parse_u32(tail).ok_or(ParseError::new(line_no, "REPEAT needs a count"))?;
                 if times == 0 {
                     return Err(ParseError::new(line_no, "REPEAT count must be at least 1"));
                 }
@@ -187,7 +205,8 @@ pub fn parse(name: &str, source: &str) -> Result<Script, ParseError> {
                 continue;
             }
             "KEYCODE" => {
-                let code = parse_keycode(tail).ok_or(ParseError::new(line_no, "KEYCODE needs a usage id"))?;
+                let code = parse_keycode(tail)
+                    .ok_or(ParseError::new(line_no, "KEYCODE needs a usage id"))?;
                 Command::Key {
                     modifiers: 0,
                     keycode: code,
@@ -227,7 +246,12 @@ pub fn parse(name: &str, source: &str) -> Result<Script, ParseError> {
                     "" | "LEFT" => super::MouseReport::LEFT_BUTTON,
                     "RIGHT" => super::MouseReport::RIGHT_BUTTON,
                     "MIDDLE" => super::MouseReport::MIDDLE_BUTTON,
-                    _ => return Err(ParseError::new(line_no, "MOUSE_CLICK expects left/right/middle")),
+                    _ => {
+                        return Err(ParseError::new(
+                            line_no,
+                            "MOUSE_CLICK expects left/right/middle",
+                        ));
+                    }
                 };
                 Command::MouseClick(button)
             }
@@ -379,9 +403,10 @@ fn parse_chord_opt(
                     // without Shift, so letters are mapped lower-case.
                     let ch = token.chars().next().unwrap_or(' ');
                     let ch = ch.to_ascii_lowercase();
-                    let (code, shift) = super::Layout::Us
-                        .map_char(ch)
-                        .ok_or(ParseError::new(line_no, "key is not representable on a US layout"))?;
+                    let (code, shift) = super::Layout::Us.map_char(ch).ok_or(ParseError::new(
+                        line_no,
+                        "key is not representable on a US layout",
+                    ))?;
                     if shift {
                         modifiers |= modifier::LEFT_SHIFT;
                     }
@@ -518,11 +543,11 @@ CTRL-SHIFT ESC
             "MUTE\nVOLUMEUP\nNEXT\nMOUSE_MOVE 10 -20\nMOUSE_CLICK right\nMOUSE_SCROLL 2",
         )
         .unwrap();
-        assert_eq!(script.commands[0], Command::Media(super::super::media::MUTE));
         assert_eq!(
-            script.commands[3],
-            Command::MouseMove { dx: 10, dy: -20 }
+            script.commands[0],
+            Command::Media(super::super::media::MUTE)
         );
+        assert_eq!(script.commands[3], Command::MouseMove { dx: 10, dy: -20 });
         assert_eq!(
             script.commands[4],
             Command::MouseClick(super::super::MouseReport::RIGHT_BUTTON)
@@ -552,10 +577,7 @@ CTRL-SHIFT ESC
     #[test]
     fn clamp_ranges_protect_the_host() {
         let script = parse("c", "MOUSE_MOVE 9999 -9999\nMOUSE_SCROLL 500").unwrap();
-        assert_eq!(
-            script.commands[0],
-            Command::MouseMove { dx: 127, dy: -127 }
-        );
+        assert_eq!(script.commands[0], Command::MouseMove { dx: 127, dy: -127 });
         assert_eq!(script.commands[1], Command::MouseScroll(127));
         let script = parse("d", "DELAY 999999999").unwrap();
         assert_eq!(script.commands[0], Command::Delay(600_000));

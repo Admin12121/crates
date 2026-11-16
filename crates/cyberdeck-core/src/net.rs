@@ -233,7 +233,10 @@ mod tests {
         for ch in 1..=13u8 {
             let channel = Channel::new(ch).unwrap();
             assert_eq!(channel.frequency_mhz(), 2407 + 5 * ch as u16);
-            assert_eq!(Channel::from_frequency_mhz(channel.frequency_mhz()), Some(channel));
+            assert_eq!(
+                Channel::from_frequency_mhz(channel.frequency_mhz()),
+                Some(channel)
+            );
         }
         assert_eq!(Channel::new(14).unwrap().frequency_mhz(), 2484);
         assert_eq!(Channel::from_frequency_mhz(2484).unwrap().get(), 14);

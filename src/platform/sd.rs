@@ -12,11 +12,11 @@ use core::cell::RefCell;
 use critical_section::Mutex;
 use embedded_hal::spi::{ErrorType, Operation, SpiBus, SpiDevice};
 use embedded_sdmmc::{Mode, SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
+use esp_hal::Blocking;
 use esp_hal::delay::Delay;
 use esp_hal::gpio::Output;
-use esp_hal::spi::master::Spi;
-use esp_hal::Blocking;
 use esp_hal::spi::Error as SpiError;
+use esp_hal::spi::master::Spi;
 
 const QUEUE_DEPTH: usize = 8;
 
@@ -39,12 +39,14 @@ impl ErrorType for SdBus<'_> {
 impl SpiDevice<u8> for SdBus<'_> {
     fn transaction(&mut self, operations: &mut [Operation<'_, u8>]) -> Result<(), SpiError> {
         self.cs.set_low();
-        let result = operations.iter_mut().try_for_each(|operation| match operation {
-            Operation::Read(buffer) => self.spi.read(buffer),
-            Operation::Write(buffer) => self.spi.write(buffer),
-            Operation::TransferInPlace(buffer) => self.spi.transfer_in_place(buffer),
-            _ => Ok(()),
-        });
+        let result = operations
+            .iter_mut()
+            .try_for_each(|operation| match operation {
+                Operation::Read(buffer) => self.spi.read(buffer),
+                Operation::Write(buffer) => self.spi.write(buffer),
+                Operation::TransferInPlace(buffer) => self.spi.transfer_in_place(buffer),
+                _ => Ok(()),
+            });
         self.cs.set_high();
         result
     }

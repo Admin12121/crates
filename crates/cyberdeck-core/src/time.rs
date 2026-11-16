@@ -17,10 +17,7 @@ pub struct Timestamp {
 }
 
 impl Timestamp {
-    pub const ZERO: Self = Self {
-        secs: 0,
-        micros: 0,
-    };
+    pub const ZERO: Self = Self { secs: 0, micros: 0 };
 
     pub const fn new(secs: u64, micros: u32) -> Self {
         Self { secs, micros }
@@ -119,7 +116,10 @@ mod tests {
         assert_eq!(ts.secs, 1);
         assert_eq!(ts.micros, 234_567);
         assert_eq!(ts.to_micros(), 1_234_567);
-        assert_eq!(Timestamp::from_uptime(1000, 1500), Timestamp::new(1001, 500_000));
+        assert_eq!(
+            Timestamp::from_uptime(1000, 1500),
+            Timestamp::new(1001, 500_000)
+        );
     }
 
     #[test]

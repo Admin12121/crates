@@ -1,10 +1,11 @@
 use alloc::string::String;
 use core::cell::RefCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use critical_section::Mutex;
+use cyberdeck_core::hid::Layout;
 use cyberdeck_core::hid::ducky;
 use cyberdeck_core::hid::engine::{HidEngine, Output};
-use cyberdeck_core::hid::Layout;
 use embassy_time::{Duration, Instant, Timer};
 use embassy_usb::class::hid::{Config as HidConfig, HidWriter, State as HidState};
 use embassy_usb::{Builder, Config as UsbConfig};
@@ -26,34 +27,130 @@ ENTER";
 
 /// Keyboard (8-byte), consumer (2-byte) and mouse (4-byte) reports behind report IDs.
 const REPORT_DESCRIPTOR: &[u8] = &[
-    0x05, 0x01, // Usage Page (Generic Desktop)
-    0x09, 0x06, // Usage (Keyboard)
-    0xA1, 0x01, // Collection (Application)
-    0x85, REPORT_KEYBOARD, //   Report ID
-    0x05, 0x07, //   Usage Page (Keyboard)
-    0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, //   modifiers
-    0x95, 0x01, 0x75, 0x08, 0x81, 0x01, //   reserved byte
-    0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x25, 0x65, 0x05, 0x07, 0x19, 0x00, 0x29, 0x65,
-    0x81, 0x00, //   six keycodes
+    0x05,
+    0x01, // Usage Page (Generic Desktop)
+    0x09,
+    0x06, // Usage (Keyboard)
+    0xA1,
+    0x01, // Collection (Application)
+    0x85,
+    REPORT_KEYBOARD, //   Report ID
+    0x05,
+    0x07, //   Usage Page (Keyboard)
+    0x19,
+    0xE0,
+    0x29,
+    0xE7,
+    0x15,
+    0x00,
+    0x25,
+    0x01,
+    0x75,
+    0x01,
+    0x95,
+    0x08,
+    0x81,
+    0x02, //   modifiers
+    0x95,
+    0x01,
+    0x75,
+    0x08,
+    0x81,
+    0x01, //   reserved byte
+    0x95,
+    0x06,
+    0x75,
+    0x08,
+    0x15,
+    0x00,
+    0x25,
+    0x65,
+    0x05,
+    0x07,
+    0x19,
+    0x00,
+    0x29,
+    0x65,
+    0x81,
+    0x00, //   six keycodes
     0xC0, // End Collection
-    0x05, 0x0C, // Usage Page (Consumer)
-    0x09, 0x01, // Usage (Consumer Control)
-    0xA1, 0x01, // Collection (Application)
-    0x85, REPORT_CONSUMER, //   Report ID
-    0x15, 0x00, 0x26, 0xFF, 0x03, 0x19, 0x00, 0x2A, 0xFF, 0x03, 0x75, 0x10, 0x95, 0x01,
-    0x81, 0x00, //   one 16-bit usage
+    0x05,
+    0x0C, // Usage Page (Consumer)
+    0x09,
+    0x01, // Usage (Consumer Control)
+    0xA1,
+    0x01, // Collection (Application)
+    0x85,
+    REPORT_CONSUMER, //   Report ID
+    0x15,
+    0x00,
+    0x26,
+    0xFF,
+    0x03,
+    0x19,
+    0x00,
+    0x2A,
+    0xFF,
+    0x03,
+    0x75,
+    0x10,
+    0x95,
+    0x01,
+    0x81,
+    0x00, //   one 16-bit usage
     0xC0, // End Collection
-    0x05, 0x01, // Usage Page (Generic Desktop)
-    0x09, 0x02, // Usage (Mouse)
-    0xA1, 0x01, // Collection (Application)
-    0x85, REPORT_MOUSE, //   Report ID
-    0x09, 0x01, //   Usage (Pointer)
-    0xA1, 0x00, //   Collection (Physical)
-    0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01,
-    0x81, 0x02, //     three buttons
-    0x95, 0x01, 0x75, 0x05, 0x81, 0x01, //     padding
-    0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08,
-    0x95, 0x03, 0x81, 0x06, //     X, Y, wheel
+    0x05,
+    0x01, // Usage Page (Generic Desktop)
+    0x09,
+    0x02, // Usage (Mouse)
+    0xA1,
+    0x01, // Collection (Application)
+    0x85,
+    REPORT_MOUSE, //   Report ID
+    0x09,
+    0x01, //   Usage (Pointer)
+    0xA1,
+    0x00, //   Collection (Physical)
+    0x05,
+    0x09,
+    0x19,
+    0x01,
+    0x29,
+    0x03,
+    0x15,
+    0x00,
+    0x25,
+    0x01,
+    0x95,
+    0x03,
+    0x75,
+    0x01,
+    0x81,
+    0x02, //     three buttons
+    0x95,
+    0x01,
+    0x75,
+    0x05,
+    0x81,
+    0x01, //     padding
+    0x05,
+    0x01,
+    0x09,
+    0x30,
+    0x09,
+    0x31,
+    0x09,
+    0x38,
+    0x15,
+    0x81,
+    0x25,
+    0x7F,
+    0x75,
+    0x08,
+    0x95,
+    0x03,
+    0x81,
+    0x06, //     X, Y, wheel
     0xC0, //   End Collection
     0xC0, // End Collection
 ];
@@ -80,6 +177,9 @@ impl UsbStatus {
     }
 }
 
+/// Set by the UI so the running script stops on the next poll.
+static CANCEL: AtomicBool = AtomicBool::new(false);
+
 static STATE: Mutex<RefCell<UsbStatus>> = Mutex::new(RefCell::new(UsbStatus::new()));
 static COMMAND: Mutex<RefCell<Option<UsbCommand>>> = Mutex::new(RefCell::new(None));
 
@@ -103,6 +203,11 @@ fn mark_installed() {
 }
 
 pub fn submit(command: UsbCommand) -> bool {
+    if matches!(command, UsbCommand::Stop) {
+        CANCEL.store(true, Ordering::Release);
+        return true;
+    }
+    CANCEL.store(false, Ordering::Release);
     critical_section::with(|cs| {
         let mut slot = COMMAND.borrow_ref_mut(cs);
         if slot.is_some() {
@@ -236,6 +341,9 @@ pub async fn run(usb: esp_hal::usb::otg::Usb<'static>) -> ! {
 
         let mut write_failed = false;
         if let Some(active) = engine.as_mut() {
+            if CANCEL.load(Ordering::Acquire) {
+                active.stop();
+            }
             let now = Instant::now().as_millis();
             while let Some(output) = active.next_report(now) {
                 let (frame, len) = encode(output);

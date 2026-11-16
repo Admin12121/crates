@@ -12,6 +12,8 @@ use alloc::vec::Vec;
 pub enum ItemStatus {
     /// Runnable.
     Ready,
+    /// Compiled and wired, but no hardware acceptance evidence yet.
+    Implemented,
     /// Implemented but requires a module that is not detected.
     RequiresHardware { device: &'static str },
     /// Group not implemented yet (never used for a Ready group).
@@ -24,6 +26,7 @@ impl ItemStatus {
     pub const fn short_label(&self) -> &'static str {
         match self {
             Self::Ready => "",
+            Self::Implemented => "BUILT",
             Self::RequiresHardware { .. } => "NO HW",
             Self::ComingSoon => "SOON",
             Self::Running => "RUN",
@@ -31,7 +34,7 @@ impl ItemStatus {
     }
 
     pub const fn is_selectable(&self) -> bool {
-        matches!(self, Self::Ready | Self::Running)
+        matches!(self, Self::Ready | Self::Implemented | Self::Running)
     }
 }
 

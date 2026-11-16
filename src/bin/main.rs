@@ -11,6 +11,7 @@
 
 extern crate alloc;
 
+use bt_hci::controller::ExternalController;
 use cyberdeck_core::board::{self, BoardId, FIELD_PROFILE};
 use cyberdeck_core::hardware::DeviceClass;
 use cyberdeck_core::rf::capture::{NrfLog, NrfPacket};
@@ -19,22 +20,24 @@ use cyberdeck_core::rf::nrf24::DataRate;
 use cyberdeck_core::rf::spectrum::Spectrum;
 use cyberdeck_core::ui::Canvas;
 use cyberdeck_firmware::app::{Action, App, Live, Tool};
-use cyberdeck_firmware::platform::display::Display;
-use cyberdeck_firmware::platform::nrf24::Nrf24;
+use cyberdeck_firmware::platform::Buttons;
+use cyberdeck_firmware::platform::battery;
 use cyberdeck_firmware::platform::ble::{self, BleCommand};
+use cyberdeck_firmware::platform::display::Display;
 use cyberdeck_firmware::platform::export;
+use cyberdeck_firmware::platform::nrf24::Nrf24;
 use cyberdeck_firmware::platform::probe::ProbeReport;
 use cyberdeck_firmware::platform::sd::{self, SdBus};
 use cyberdeck_firmware::platform::usb::{self, UsbCommand};
 use cyberdeck_firmware::platform::wifi::{self, WifiCommand};
-use cyberdeck_firmware::platform::Buttons;
-use bt_hci::controller::ExternalController;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
+use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
 use esp_hal::clock::CpuClock;
+use esp_hal::delay::Delay;
 use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
-use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::spi::Mode;
+use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::ble::controller::BleConnector;
@@ -76,6 +79,7 @@ enum RfMode {
 
 struct RfRuntime<'d> {
     radio: Option<Nrf24<'d>>,
+    delay: Delay,
     mode: RfMode,
     spectrum: Spectrum,
     log: NrfLog<24>,
@@ -87,6 +91,7 @@ impl<'d> RfRuntime<'d> {
     fn new(radio: Option<Nrf24<'d>>) -> Self {
         Self {
             radio,
+            delay: Delay::new(),
             mode: RfMode::Off,
             spectrum: Spectrum::new(),
             log: NrfLog::new(),
@@ -106,7 +111,11 @@ impl<'d> RfRuntime<'d> {
                 let channel = 1 + (self.channel_cursor % channels.saturating_sub(2).max(1)) as u8;
                 self.channel_cursor = self.channel_cursor.wrapping_add(1);
                 if radio.set_channel(channel).is_ok() {
+                    // CE must be high for the RPD to reflect live channel energy.
+                    radio.rx_mode(true);
+                    self.delay.delay_micros(300);
                     let _ = radio.sample(&mut self.spectrum);
+                    radio.rx_mode(false);
                 }
                 if self.channel_cursor % 64 == 0 {
                     self.spectrum.finish_sweep();
@@ -117,7 +126,8 @@ impl<'d> RfRuntime<'d> {
                 if let Ok(Some((pipe, len))) = radio.read_packet(&mut buffer) {
                     let payload = &buffer[..usize::from(len)];
                     if cyberdeck_core::rf::capture::plausible_length(len) {
-                        self.log.push(NrfPacket::new(radio.channel(), pipe, payload, now_ms));
+                        self.log
+                            .push(NrfPacket::new(radio.channel(), pipe, payload, now_ms));
                         self.packets = self.packets.saturating_add(1);
                     }
                 }
@@ -159,6 +169,12 @@ async fn main(spawner: Spawner) -> ! {
     let spi_config = SpiConfig::default()
         .with_frequency(Rate::from_mhz(40))
         .with_mode(Mode::_0);
+    // Wokwi offers an ILI9341; real board builds keep the ST7789 profile.
+    let display_controller = if cfg!(cyberdeck_sim_wokwi) {
+        board::DisplayController::Ili9341
+    } else {
+        profile.display_controller
+    };
     let mut display = match Spi::new(peripherals.SPI2, spi_config) {
         Ok(spi) => {
             let spi = spi
@@ -172,7 +188,7 @@ async fn main(spawner: Spawner) -> ! {
                 Output::new(peripherals.GPIO14, Level::High, output),
                 Some(Output::new(peripherals.GPIO13, Level::Low, output)),
                 profile.display_geometry,
-                profile.display_controller,
+                display_controller,
             )
             .map_err(|error| error.message())
         }
@@ -200,7 +216,10 @@ async fn main(spawner: Spawner) -> ! {
         Input::new(peripherals.GPIO7, input_config),
         Input::new(peripherals.GPIO15, input_config),
     );
-    probe.record(DeviceClass::Input, Ok(Some(alloc::string::String::from("5 buttons"))));
+    probe.record(
+        DeviceClass::Input,
+        Ok(Some(alloc::string::String::from("5 buttons"))),
+    );
 
     // ---- Wi-Fi radio ----
     let mut wifi_started = false;
@@ -219,6 +238,28 @@ async fn main(spawner: Spawner) -> ! {
         Err(_) => probe.record(DeviceClass::WifiRadio, Err("Wi-Fi controller init failed")),
     }
 
+    // ---- battery monitor (ADC1 on the profile's battery pin) ----
+    let mut battery_adc = if let Some(battery_pins) = profile.battery {
+        let mut adc_config = AdcConfig::new();
+        let pin = adc_config.enable_pin(peripherals.GPIO8, Attenuation::_11dB);
+        let adc = Adc::new(peripherals.ADC1, adc_config);
+        probe.record(
+            DeviceClass::BatteryAdc,
+            Ok(Some(alloc::format!(
+                "ADC1 GPIO{} 1:{}",
+                battery_pins.pin,
+                battery_pins.divider
+            ))),
+        );
+        Some((adc, pin, battery_pins.divider, 0u64))
+    } else {
+        probe.record(
+            DeviceClass::BatteryAdc,
+            Err("no battery pin in this profile"),
+        );
+        None
+    };
+
     // ---- microSD (SPI3; the FIELD profile gives that bus to the nRF24) ----
     #[cfg(cyberdeck_board_field)]
     probe.record(
@@ -236,11 +277,7 @@ async fn main(spawner: Spawner) -> ! {
                     .with_sck(peripherals.GPIO39)
                     .with_mosi(peripherals.GPIO40)
                     .with_miso(peripherals.GPIO41);
-                let cs = Output::new(
-                    peripherals.GPIO42,
-                    Level::High,
-                    OutputConfig::default(),
-                );
+                let cs = Output::new(peripherals.GPIO42, Level::High, OutputConfig::default());
                 match sd_actor(SdBus::new(spi, cs)) {
                     Ok(token) => {
                         spawner.spawn(token);
@@ -265,8 +302,9 @@ async fn main(spawner: Spawner) -> ! {
         }
     }
 
-    // ---- USB HID ----
+    // ---- USB HID (Wokwi only models USB CDC, not composite HID) ----
     let mut usb_started = false;
+    #[cfg(not(cyberdeck_sim_wokwi))]
     match usb_actor(esp_hal::usb::otg::Usb::new_fs(
         peripherals.USB_FS,
         peripherals.GPIO20,
@@ -292,9 +330,15 @@ async fn main(spawner: Spawner) -> ! {
         }
         Err(_) => probe.record(DeviceClass::UsbDevice, Err("USB task could not start")),
     }
+    #[cfg(cyberdeck_sim_wokwi)]
+    probe.record(
+        DeviceClass::UsbDevice,
+        Err("USB HID not simulated by Wokwi"),
+    );
 
-    // ---- BLE radio ----
+    // ---- BLE radio (unsupported by Wokwi) ----
     let mut ble_started = false;
+    #[cfg(not(cyberdeck_sim_wokwi))]
     match BleConnector::new(peripherals.BT, Default::default()) {
         Ok(connector) => {
             let controller = ExternalController::<_, 1>::new(connector);
@@ -313,6 +357,11 @@ async fn main(spawner: Spawner) -> ! {
         }
         Err(_) => probe.record(DeviceClass::BleRadio, Err("BLE controller init failed")),
     }
+    #[cfg(cyberdeck_sim_wokwi)]
+    probe.record(
+        DeviceClass::BleRadio,
+        Err("Bluetooth not simulated by Wokwi"),
+    );
 
     // ---- nRF24 (FIELD profile only; SPI3 belongs to the SD card otherwise) ----
     #[cfg(cyberdeck_board_field)]
@@ -379,80 +428,81 @@ async fn main(spawner: Spawner) -> ! {
         if let Some(button) = buttons.poll(now_ms) {
             match app.handle(button) {
                 Action::Start(tool) => {
+                    app.clear_message();
                     active_tool = Some(tool);
                     match tool {
-                    // Tracked below so leaving a tool can export what it collected.
-                    Tool::WifiScan => {
-                        if !wifi_started || !wifi::submit(WifiCommand::Scan) {
-                            app.set_message("Wi-Fi radio busy");
+                        // Tracked below so leaving a tool can export what it collected.
+                        Tool::WifiScan => {
+                            if !wifi_started || !wifi::submit(WifiCommand::Scan) {
+                                app.set_message("Wi-Fi radio busy");
+                            }
+                        }
+                        Tool::WifiCapture | Tool::PktCapture => {
+                            if !wifi_started || !wifi::submit(WifiCommand::Capture { channel: 6 }) {
+                                app.set_message("Wi-Fi radio busy");
+                            }
+                        }
+                        Tool::WifiBeacon => {
+                            if !wifi_started
+                                || !wifi::submit(WifiCommand::Attack {
+                                    mode: cyberdeck_core::wifi::attack::AttackMode::BeaconSpam,
+                                    channel: 6,
+                                })
+                            {
+                                app.set_message("Wi-Fi radio busy");
+                            }
+                        }
+                        Tool::WifiDeauth => {
+                            if !wifi_started
+                                || !wifi::submit(WifiCommand::Attack {
+                                    mode: cyberdeck_core::wifi::attack::AttackMode::Deauth,
+                                    channel: 6,
+                                })
+                            {
+                                app.set_message("Wi-Fi radio busy");
+                            }
+                        }
+                        Tool::PktAnalyse => {
+                            app.set_message("live capture feeds the inspector");
+                        }
+                        Tool::BleScan => {
+                            if !ble_started || !ble::submit(BleCommand::Scan) {
+                                app.set_message("Bluetooth radio busy");
+                            }
+                        }
+                        Tool::BleSpam => {
+                            if !ble_started
+                                || !ble::submit(BleCommand::Advertise(
+                                    cyberdeck_core::ble::spam::SpamCampaign::Apple,
+                                ))
+                            {
+                                app.set_message("Bluetooth radio busy");
+                            }
+                        }
+                        Tool::HidIntro | Tool::HidDucky => {
+                            if !usb_started || !usb::submit(UsbCommand::RunDemo) {
+                                app.set_message("USB HID busy");
+                            }
+                        }
+                        Tool::RfSpectrum => {
+                            if rf.radio.is_some() {
+                                rf_mode = RfMode::Spectrum;
+                                rf.mode = RfMode::Spectrum;
+                            } else {
+                                app.set_message("No hardware detected: nRF24L01 radio");
+                            }
+                        }
+                        Tool::RfCapture => {
+                            if rf.radio.is_some() {
+                                rf_mode = RfMode::Capture;
+                                rf.mode = RfMode::Capture;
+                                let _ = rf.radio.as_mut().map(|radio| radio.power_up_rx());
+                            } else {
+                                app.set_message("No hardware detected: nRF24L01 radio");
+                            }
                         }
                     }
-                    Tool::WifiCapture | Tool::PktCapture => {
-                        if !wifi_started || !wifi::submit(WifiCommand::Capture { channel: 6 }) {
-                            app.set_message("Wi-Fi radio busy");
-                        }
-                    }
-                    Tool::WifiBeacon => {
-                        if !wifi_started
-                            || !wifi::submit(WifiCommand::Attack {
-                                mode: cyberdeck_core::wifi::attack::AttackMode::BeaconSpam,
-                                channel: 6,
-                            })
-                        {
-                            app.set_message("Wi-Fi radio busy");
-                        }
-                    }
-                    Tool::WifiDeauth => {
-                        if !wifi_started
-                            || !wifi::submit(WifiCommand::Attack {
-                                mode: cyberdeck_core::wifi::attack::AttackMode::Deauth,
-                                channel: 6,
-                            })
-                        {
-                            app.set_message("Wi-Fi radio busy");
-                        }
-                    }
-                    Tool::PktAnalyse => {
-                        app.set_message("live capture feeds the inspector");
-                    }
-                    Tool::BleScan => {
-                        if !ble_started || !ble::submit(BleCommand::Scan) {
-                            app.set_message("Bluetooth radio busy");
-                        }
-                    }
-                    Tool::BleSpam => {
-                        if !ble_started
-                            || !ble::submit(BleCommand::Advertise(
-                                cyberdeck_core::ble::spam::SpamCampaign::Apple,
-                            ))
-                        {
-                            app.set_message("Bluetooth radio busy");
-                        }
-                    }
-                    Tool::HidIntro | Tool::HidDucky => {
-                        if !usb_started || !usb::submit(UsbCommand::RunDemo) {
-                            app.set_message("USB HID busy");
-                        }
-                    }
-                    Tool::RfSpectrum => {
-                        if rf.radio.is_some() {
-                            rf_mode = RfMode::Spectrum;
-                            rf.mode = RfMode::Spectrum;
-                        } else {
-                            app.set_message("No hardware detected: nRF24L01 radio");
-                        }
-                    }
-                    Tool::RfCapture => {
-                        if rf.radio.is_some() {
-                            rf_mode = RfMode::Capture;
-                            rf.mode = RfMode::Capture;
-                            let _ = rf.radio.as_mut().map(|radio| radio.power_up_rx());
-                        } else {
-                            app.set_message("No hardware detected: nRF24L01 radio");
-                        }
-                    }
-                    }
-                },
+                }
                 Action::Stop => {
                     // Persist whatever the running tool collected before the radios stop.
                     match active_tool {
@@ -481,6 +531,9 @@ async fn main(spawner: Spawner) -> ! {
                     }
                     rf_mode = RfMode::Off;
                     rf.mode = RfMode::Off;
+                    if let Some(radio) = rf.radio.as_mut() {
+                        let _ = radio.power_down();
+                    }
                 }
                 Action::None => {}
             }
@@ -488,6 +541,12 @@ async fn main(spawner: Spawner) -> ! {
 
         rf.step(now_ms);
 
+        if let Some((adc, pin, divider, last)) = battery_adc.as_mut() {
+            if now_ms.saturating_sub(*last) >= 500 {
+                battery::publish(adc.read_blocking(pin), *divider);
+                *last = now_ms;
+            }
+        }
 
         let (status, aps, frames, dropped, _channel, _frame) = wifi::snapshot();
         let (ble_status, ble_devices, ble_frames, _ble_dropped) = ble::snapshot();
@@ -513,9 +572,10 @@ async fn main(spawner: Spawner) -> ! {
             probe_lines: {
                 let mut lines = probe.lines.clone();
                 lines.push(sd::status_line());
+                lines.push(battery::status_line());
                 lines
             },
-            message: None,
+            message: app.message(),
         };
         live.wifi_busy = matches!(rf_mode, RfMode::Off);
         app.set_live(live);

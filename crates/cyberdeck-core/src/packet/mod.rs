@@ -113,12 +113,16 @@ impl ProtocolHistogram {
             FrameKind::ProbeResponse => {
                 self.probe_responses = self.probe_responses.saturating_add(1)
             }
-            FrameKind::Authentication => self.authentication = self.authentication.saturating_add(1),
+            FrameKind::Authentication => {
+                self.authentication = self.authentication.saturating_add(1)
+            }
             FrameKind::Association => self.association = self.association.saturating_add(1),
             FrameKind::Deauthentication => {
                 self.deauthentication = self.deauthentication.saturating_add(1)
             }
-            FrameKind::Disassociation => self.disassociation = self.disassociation.saturating_add(1),
+            FrameKind::Disassociation => {
+                self.disassociation = self.disassociation.saturating_add(1)
+            }
             FrameKind::Action => self.action = self.action.saturating_add(1),
             FrameKind::Eapol => self.eapol = self.eapol.saturating_add(1),
             FrameKind::Data => self.data = self.data.saturating_add(1),
@@ -256,13 +260,7 @@ pub struct PacketSummary {
 }
 
 impl PacketSummary {
-    pub fn build(
-        index: u32,
-        ts: Timestamp,
-        data: &[u8],
-        channel: u8,
-        rssi: i8,
-    ) -> PacketSummary {
+    pub fn build(index: u32, ts: Timestamp, data: &[u8], channel: u8, rssi: i8) -> PacketSummary {
         let (kind, header) = classify(data);
         let (source, destination) = match header {
             Some(header) => (header.addr2, header.addr1),
@@ -496,9 +494,11 @@ mod tests {
         assert_eq!(histogram.beacons, 2);
         assert_eq!(histogram.total(), 4);
         let report = histogram.report();
-        assert!(report
-            .lines()
-            .any(|line| line.starts_with("Beacons") && line.trim_end().ends_with('2')));
+        assert!(
+            report
+                .lines()
+                .any(|line| line.starts_with("Beacons") && line.trim_end().ends_with('2'))
+        );
         assert!(report.contains("EAPOL"));
     }
 
@@ -529,7 +529,13 @@ mod tests {
         let mut log: PacketLog<3> = PacketLog::new();
         let beacon = beacon_frame_bytes();
         for i in 0..5 {
-            log.push(PacketSummary::build(i, Timestamp::new(1, 0), &beacon, 6, -40));
+            log.push(PacketSummary::build(
+                i,
+                Timestamp::new(1, 0),
+                &beacon,
+                6,
+                -40,
+            ));
         }
         assert_eq!(log.len(), 3);
         assert_eq!(log.dropped(), 2);
@@ -563,7 +569,10 @@ mod tests {
 
     #[test]
     fn file_names_are_sortable_and_slugged() {
-        assert_eq!(session_file_name("capture", 12_000), "cd-capture-000012.pcap");
+        assert_eq!(
+            session_file_name("capture", 12_000),
+            "cd-capture-000012.pcap"
+        );
         assert_eq!(session_file_name("ap", 0), "cd-ap-000000.pcap");
     }
 
