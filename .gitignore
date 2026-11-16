@@ -27,3 +27,4 @@ target/
 
 reference
 docs
+.web-bridge-targets/*

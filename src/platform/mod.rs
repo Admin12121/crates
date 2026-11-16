@@ -9,7 +9,10 @@ pub mod ble;
 pub mod display;
 pub mod input;
 pub mod nrf24;
+pub mod export;
 pub mod probe;
+pub mod sd;
+pub mod usb;
 pub mod wifi;
 
 pub use display::Display;

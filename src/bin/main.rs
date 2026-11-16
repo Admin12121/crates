@@ -14,6 +14,7 @@ extern crate alloc;
 use cyberdeck_core::board::{self, BoardId, FIELD_PROFILE};
 use cyberdeck_core::hardware::DeviceClass;
 use cyberdeck_core::rf::capture::{NrfLog, NrfPacket};
+#[cfg(cyberdeck_board_field)]
 use cyberdeck_core::rf::nrf24::DataRate;
 use cyberdeck_core::rf::spectrum::Spectrum;
 use cyberdeck_core::ui::Canvas;
@@ -21,7 +22,10 @@ use cyberdeck_firmware::app::{Action, App, Live, Tool};
 use cyberdeck_firmware::platform::display::Display;
 use cyberdeck_firmware::platform::nrf24::Nrf24;
 use cyberdeck_firmware::platform::ble::{self, BleCommand};
+use cyberdeck_firmware::platform::export;
 use cyberdeck_firmware::platform::probe::ProbeReport;
+use cyberdeck_firmware::platform::sd::{self, SdBus};
+use cyberdeck_firmware::platform::usb::{self, UsbCommand};
 use cyberdeck_firmware::platform::wifi::{self, WifiCommand};
 use cyberdeck_firmware::platform::Buttons;
 use bt_hci::controller::ExternalController;
@@ -51,6 +55,16 @@ async fn wifi_actor(controller: WifiController<'static>) {
 #[embassy_executor::task]
 async fn ble_actor(controller: ExternalController<BleConnector<'static>, 1>) {
     ble::run(controller).await
+}
+
+#[embassy_executor::task]
+async fn sd_actor(bus: SdBus<'static>) {
+    sd::run(bus).await
+}
+
+#[embassy_executor::task]
+async fn usb_actor(usb: esp_hal::usb::otg::Usb<'static>) {
+    usb::run(usb).await
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -205,6 +219,80 @@ async fn main(spawner: Spawner) -> ! {
         Err(_) => probe.record(DeviceClass::WifiRadio, Err("Wi-Fi controller init failed")),
     }
 
+    // ---- microSD (SPI3; the FIELD profile gives that bus to the nRF24) ----
+    #[cfg(cyberdeck_board_field)]
+    probe.record(
+        DeviceClass::SdCard,
+        Err("SPI3 shared with the nRF24 module"),
+    );
+    #[cfg(not(cyberdeck_board_field))]
+    {
+        let sd_config = SpiConfig::default()
+            .with_frequency(Rate::from_khz(400))
+            .with_mode(Mode::_0);
+        match Spi::new(peripherals.SPI3, sd_config) {
+            Ok(spi) => {
+                let spi = spi
+                    .with_sck(peripherals.GPIO39)
+                    .with_mosi(peripherals.GPIO40)
+                    .with_miso(peripherals.GPIO41);
+                let cs = Output::new(
+                    peripherals.GPIO42,
+                    Level::High,
+                    OutputConfig::default(),
+                );
+                match sd_actor(SdBus::new(spi, cs)) {
+                    Ok(token) => {
+                        spawner.spawn(token);
+                        let mut waited = 0;
+                        while !sd::ready() && waited < 500 {
+                            Timer::after(Duration::from_millis(10)).await;
+                            waited += 10;
+                        }
+                        if sd::ready() {
+                            probe.record(
+                                DeviceClass::SdCard,
+                                Ok(Some(alloc::string::String::from("FAT mounted"))),
+                            );
+                        } else {
+                            probe.record(DeviceClass::SdCard, Err("no FAT volume"));
+                        }
+                    }
+                    Err(_) => probe.record(DeviceClass::SdCard, Err("SD task could not start")),
+                }
+            }
+            Err(_) => probe.record(DeviceClass::SdCard, Err("SPI3 config failed")),
+        }
+    }
+
+    // ---- USB HID ----
+    let mut usb_started = false;
+    match usb_actor(esp_hal::usb::otg::Usb::new_fs(
+        peripherals.USB_FS,
+        peripherals.GPIO20,
+        peripherals.GPIO19,
+    )) {
+        Ok(token) => {
+            spawner.spawn(token);
+            usb_started = true;
+            // Give the task a moment to build the stack so the menu reflects reality.
+            let mut waited = 0;
+            while !usb::is_installed() && waited < 200 {
+                Timer::after(Duration::from_millis(5)).await;
+                waited += 5;
+            }
+            if usb::is_installed() {
+                probe.record(
+                    DeviceClass::UsbDevice,
+                    Ok(Some(alloc::string::String::from("HID keyboard"))),
+                );
+            } else {
+                probe.record(DeviceClass::UsbDevice, Err("USB stack did not start"));
+            }
+        }
+        Err(_) => probe.record(DeviceClass::UsbDevice, Err("USB task could not start")),
+    }
+
     // ---- BLE radio ----
     let mut ble_started = false;
     match BleConnector::new(peripherals.BT, Default::default()) {
@@ -226,8 +314,9 @@ async fn main(spawner: Spawner) -> ! {
         Err(_) => probe.record(DeviceClass::BleRadio, Err("BLE controller init failed")),
     }
 
-    // ---- nRF24 (FIELD profile only; shares the SPI3 pins from the profile) ----
-    let nrf = if profile.id == BoardId::FieldS3 && profile.nrf24.is_some() {
+    // ---- nRF24 (FIELD profile only; SPI3 belongs to the SD card otherwise) ----
+    #[cfg(cyberdeck_board_field)]
+    let nrf = if profile.nrf24.is_some() {
         let spi_config = SpiConfig::default()
             .with_frequency(Rate::from_mhz(8))
             .with_mode(Mode::_0);
@@ -266,10 +355,19 @@ async fn main(spawner: Spawner) -> ! {
         );
         None
     };
+    #[cfg(not(cyberdeck_board_field))]
+    let nrf: Option<Nrf24<'static>> = {
+        probe.record(
+            DeviceClass::Nrf24,
+            Err("not detected: connect an nRF24L01 module (FIELD profile)"),
+        );
+        None
+    };
 
     let mut rf = RfRuntime::new(nrf);
     let mut app = App::new(probe.registry);
     let mut rf_mode = RfMode::Off;
+    let mut active_tool: Option<Tool> = None;
     let mut last_render_ms = 0u64;
 
     // Keep the profile referenced so the FIELD constant cannot be optimised out of
@@ -280,7 +378,10 @@ async fn main(spawner: Spawner) -> ! {
         let now_ms = embassy_time::Instant::now().as_millis();
         if let Some(button) = buttons.poll(now_ms) {
             match app.handle(button) {
-                Action::Start(tool) => match tool {
+                Action::Start(tool) => {
+                    active_tool = Some(tool);
+                    match tool {
+                    // Tracked below so leaving a tool can export what it collected.
                     Tool::WifiScan => {
                         if !wifi_started || !wifi::submit(WifiCommand::Scan) {
                             app.set_message("Wi-Fi radio busy");
@@ -328,6 +429,11 @@ async fn main(spawner: Spawner) -> ! {
                             app.set_message("Bluetooth radio busy");
                         }
                     }
+                    Tool::HidIntro | Tool::HidDucky => {
+                        if !usb_started || !usb::submit(UsbCommand::RunDemo) {
+                            app.set_message("USB HID busy");
+                        }
+                    }
                     Tool::RfSpectrum => {
                         if rf.radio.is_some() {
                             rf_mode = RfMode::Spectrum;
@@ -345,14 +451,33 @@ async fn main(spawner: Spawner) -> ! {
                             app.set_message("No hardware detected: nRF24L01 radio");
                         }
                     }
-                    _ => {}
+                    }
                 },
                 Action::Stop => {
+                    // Persist whatever the running tool collected before the radios stop.
+                    match active_tool {
+                        Some(Tool::WifiScan) => {
+                            let (_, aps, _, _, _, _) = wifi::snapshot();
+                            let _ = export::save_wifi_findings(&aps);
+                        }
+                        Some(Tool::BleScan | Tool::BleSpam) => {
+                            let (_, devices, frames, _) = ble::snapshot();
+                            let _ = export::save_ble_history(&devices, frames);
+                        }
+                        Some(Tool::RfCapture) => {
+                            let _ = export::save_rf_capture(&rf.log);
+                        }
+                        _ => {}
+                    }
+                    active_tool = None;
                     if wifi_started {
                         wifi::submit(WifiCommand::Stop);
                     }
                     if ble_started {
                         ble::submit(BleCommand::Stop);
+                    }
+                    if usb_started {
+                        usb::submit(UsbCommand::Stop);
                     }
                     rf_mode = RfMode::Off;
                     rf.mode = RfMode::Off;
@@ -363,8 +488,11 @@ async fn main(spawner: Spawner) -> ! {
 
         rf.step(now_ms);
 
+
         let (status, aps, frames, dropped, _channel, _frame) = wifi::snapshot();
         let (ble_status, ble_devices, ble_frames, _ble_dropped) = ble::snapshot();
+        let (usb_status, usb_percent, usb_keystrokes, usb_unsupported, _usb_running) =
+            usb::snapshot();
         let mut live = Live {
             wifi_status: status,
             wifi_busy: false,
@@ -378,7 +506,15 @@ async fn main(spawner: Spawner) -> ! {
             ble_status,
             ble_devices,
             ble_frames,
-            probe_lines: probe.lines.clone(),
+            usb_status,
+            usb_percent,
+            usb_keystrokes,
+            usb_unsupported,
+            probe_lines: {
+                let mut lines = probe.lines.clone();
+                lines.push(sd::status_line());
+                lines
+            },
             message: None,
         };
         live.wifi_busy = matches!(rf_mode, RfMode::Off);

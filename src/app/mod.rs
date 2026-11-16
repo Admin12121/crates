@@ -93,6 +93,8 @@ impl Tool {
                 | Self::PktAnalyse
                 | Self::BleScan
                 | Self::BleSpam
+                | Self::HidIntro
+                | Self::HidDucky
                 | Self::RfSpectrum
                 | Self::RfCapture
         )
@@ -122,6 +124,10 @@ pub struct Live {
     pub ble_status: String,
     pub ble_devices: Vec<BleDevice>,
     pub ble_frames: u32,
+    pub usb_status: String,
+    pub usb_percent: u8,
+    pub usb_keystrokes: u32,
+    pub usb_unsupported: u32,
     pub probe_lines: Vec<String>,
     pub message: Option<String>,
 }
@@ -439,7 +445,12 @@ impl App {
                 }
             }
             Tool::HidIntro | Tool::HidDucky => {
-                lines.push(String::from("USB HID transport not enabled"));
+                lines.push(self.live.usb_status.clone());
+                lines.push(format!("{}% typed", self.live.usb_percent));
+                lines.push(format!("keys {}", self.live.usb_keystrokes));
+                if self.live.usb_unsupported > 0 {
+                    lines.push(format!("skipped {}", self.live.usb_unsupported));
+                }
             }
         }
         let mut y = 26;
