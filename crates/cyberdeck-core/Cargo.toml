@@ -7,7 +7,9 @@ version      = "0.1.0"
 license      = "MIT OR Apache-2.0"
 
 # Deliberately dependency-free: the firmware and the host test suite share exactly
-# one implementation of every protocol/format engine.
+# one implementation of every protocol/format engine. remoteid is no_std with no
+# dependencies of its own.
 [dependencies]
+remoteid = { version = "0.3.3", default-features = false }
 
 [dev-dependencies]
