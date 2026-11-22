@@ -261,37 +261,35 @@ fn id_type_label(value: u8) -> &'static str {
 /// UUID(2) | application code 0x0D | message counter(1) | 25-byte message.
 /// The message itself is `(type << 4) | protocol_version` followed by the body.
 pub fn parse_remote_id(service_data: &[u8]) -> Option<RemoteId> {
-    if service_data.len() < 4 + 25 {
-        return None;
+    parse_remote_id_messages(service_data)
+        .into_iter()
+        .find_map(|message| match message {
+            remoteid::Message::BasicId(basic) => Some(RemoteId {
+                protocol_version: basic.protocol_version,
+                ua_type: ua_type_label(basic.ua_type.into()),
+                id_type: id_type_label(basic.id_type.into()),
+                uas_id: crate::util::printable(
+                    &basic.uas_id[..basic.uas_id.iter().position(|b| *b == 0).unwrap_or(20)],
+                ),
+            }),
+            _ => None,
+        })
+}
+
+/// Decode every Remote ID message in the service data: Basic ID, Location/Vector,
+/// Auth, Self-ID, System and Operator ID, from a single message (Bluetooth 4) or
+/// a message pack (Bluetooth 5).
+pub fn parse_remote_id_messages(service_data: &[u8]) -> Vec<remoteid::Message> {
+    if service_data.len() < 2
+        || u16::from_le_bytes([service_data[0], service_data[1]]) != ServiceUuid::REMOTE_ID.0
+    {
+        return Vec::new();
     }
-    if u16::from_le_bytes([service_data[0], service_data[1]]) != ServiceUuid::REMOTE_ID.0 {
-        return None;
+    match remoteid::ble::parse_service_data(&service_data[2..]).and_then(|ble| ble.frame()) {
+        Ok(remoteid::Frame::Message(message)) => Vec::from([message]),
+        Ok(remoteid::Frame::Pack(pack)) => pack.messages().filter_map(Result::ok).collect(),
+        Err(_) => Vec::new(),
     }
-    if service_data[2] != 0x0D {
-        return None;
-    }
-    let message = &service_data[4..4 + 25];
-    let message_type = message[0] >> 4;
-    let protocol_version = message[0] & 0x0F;
-    if message_type != 0 {
-        // Only Basic ID is decoded; other message types are surfaced as detected
-        // but not interpreted, never filled with invented values.
-        return None;
-    }
-    // Byte 1 packs ID type in the high nibble and UA type in the low nibble.
-    let id_type = message[1] >> 4;
-    let ua_type = message[1] & 0x0F;
-    let id_bytes: Vec<u8> = message[2..22]
-        .iter()
-        .copied()
-        .take_while(|b| *b != 0)
-        .collect();
-    Some(RemoteId {
-        protocol_version,
-        ua_type: ua_type_label(ua_type),
-        id_type: id_type_label(id_type),
-        uas_id: crate::util::printable(&id_bytes),
-    })
 }
 
 /// Remote ID message type of a service-data payload (0 = Basic ID, 1 = Location...).
@@ -416,6 +414,36 @@ mod tests {
         let mut wrong = service.clone();
         wrong[2] = 0x00;
         assert!(remote_id_message_type(&wrong).is_none());
+    }
+
+    #[test]
+    fn remote_id_decodes_location_and_operator_id() {
+        let location = remoteid::Message::Location(remoteid::Location {
+            latitude: 47.3977,
+            longitude: 8.5456,
+            ..Default::default()
+        })
+        .encode()
+        .unwrap();
+        let mut service = alloc::vec![0xFA, 0xFF, 0x0D, 0x01];
+        service.extend_from_slice(&location);
+        assert!(parse_remote_id(&service).is_none());
+        let messages = parse_remote_id_messages(&service);
+        let remoteid::Message::Location(loc) = &messages[0] else {
+            panic!("location not decoded: {messages:?}");
+        };
+        let (lat, lon) = loc.position().expect("position");
+        assert!((lat - 47.3977).abs() < 1e-6 && (lon - 8.5456).abs() < 1e-6);
+
+        let mut operator = [0u8; 25];
+        operator[0] = 0x52; // Operator ID, proto 2
+        operator[2..14].copy_from_slice(b"FIN87astrdge");
+        let mut service = alloc::vec![0xFA, 0xFF, 0x0D, 0x02];
+        service.extend_from_slice(&operator);
+        assert!(matches!(
+            parse_remote_id_messages(&service)[..],
+            [remoteid::Message::OperatorId(_)]
+        ));
     }
 
     #[test]
